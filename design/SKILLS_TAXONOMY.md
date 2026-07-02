@@ -171,14 +171,16 @@ over separately (§4) so exclusions can be audited independently, echoing
 
 ## 3. Storage — TerminusDB schema
 
-Three document classes, added to `Data.TerminusDB.Schema.classes/0`
-(currently `[]` — see `lib/data/terminus_db/schema.ex`) and synced via
-`mix terminus.setup`:
+Three top-level document classes, plus `Synonym` as an embedded
+subdocument of `Role` (four `Class` entries total) — implemented in
+`Data.TerminusDB.Schema.classes/0` (`lib/data/terminus_db/schema.ex`) and
+synced via `mix terminus.setup`. Verified live against
+`mark-i5.mediazu.org`.
 
 ```
 Role
-  @id, primary_name, locale, industry, description
-  synonyms: {"@type" => "List", "@class" => "Synonym"}   # embedded subdocuments: {term, locale}
+  @id (Lexical: primary_name + context), primary_name, context, locale, industry, description
+  synonyms: {"@type" => "Set", "@class" => "Synonym"}   # embedded subdocuments: {term, locale}
 
 Skill
   @id, name
@@ -478,3 +480,57 @@ lens doesn't have to be refactored to make room for the second.
 - **`heeero_core` integration** — standalone for now. If pursued later,
   expected shape is an API service this app exposes, gated on
   performance being good enough to justify it — not a code port/merge.
+
+---
+
+## 10. Future exploration (not scheduled)
+
+Ideas surfaced during design discussion, deliberately kept separate from
+the committed roadmap (§8) — captured so they aren't lost, not because
+any of this is decided or scheduled.
+
+### LLM-assisted candidate generation + mobile swipe triage
+
+When describing a new role (or improving an existing one), call an LLM
+to generate a candidate word cloud for it — synonyms, supporting skills,
+lookalike roles — instead of a contributor typing a structured cluster
+from scratch. On mobile, present the candidates as a fast swipe-triage
+UI rather than a form: swipe to keep/discard (building `synonym`/
+`supporting`/`hard_negative` sets as inclusions vs. exclusions),
+ordering by importance, possibly left/right mapped to positive/negative.
+
+- Distinct from the Nx layer (§6): an LLM generates plausible
+  *candidate terms* in natural language for a human to judge; Nx
+  measures *numeric similarity* between terms already in the taxonomy.
+  Different tools, different jobs — worth keeping conceptually separate
+  rather than folding "AI helps write the data" into "AI helps score
+  the data."
+- Natural fit for `confidence` (§2), which today has no real signal
+  behind it: an LLM-suggested-then-swiped-yes term could reasonably
+  default to `guess` (machine-suggested, human-confirmed quickly, not
+  deeply vetted), while a manually-typed entry carries whatever the
+  contributor states — giving that field an actual basis instead of
+  always defaulting flat.
+- Accelerates the LiveView/CSV entry path from §4 — doesn't change the
+  data model. Same `Role`/`RoleRelation` documents result either way.
+
+### Concentric-circle drag UI (web/admin)
+
+Primary skill fixed at the center; candidate related terms placed as
+draggable nodes; distance from center expresses relevance/match
+strength, set by a physical drag gesture rather than typing a number.
+
+- Directly relevant to the `weight` field decision (§2/§3): weight was
+  deliberately kept out of human hands because people are unreliable at
+  *typing* a meaningful decimal. A drag gesture sidesteps that
+  objection entirely — it's a spatial/analog action, not a numeric
+  estimate — so this may be the one interface where a human-set weight
+  is actually trustworthy. Worth revisiting the Nx-only-writes-weight
+  decision if this gets built.
+- Also a plausible *training signal* for the Nx projection (§6): rather
+  than Nx supplying weight unilaterally, human-placed positions could
+  serve as additional labeled input — alongside `synonym`/
+  `hard_negative` pairs — for the contrastive loss to learn to
+  reproduce.
+- An additional entry mode alongside §4's LiveView form and CSV import,
+  not a replacement for either.
