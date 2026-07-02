@@ -368,6 +368,11 @@ network round trip.
   function; a single role is just a `parsed()` result with one `Role` in
   it. Editing an existing role uses `Data.SkillTaxonomy.RoleLoader.fetch/2`,
   `RowBuilder`'s inverse, to pre-fill the form from what's already stored.
+  This one-role-at-a-time form is expected to grow siblings, not stay
+  the only LiveView view over this data — a role list/browse view, a
+  stub/near-duplicate reconciliation view, and a raw "truth tuples" view
+  over §5's materialized `Knowledge` are all captured in §11 (not
+  scheduled yet).
 
 All paths write through `TerminusDB.Document.insert`/`replace` using
 `Data.TerminusDB.config/1`, matching the pattern already established for
@@ -754,6 +759,12 @@ later."
   either via `Yog` directly (see note below) or a generic Choreo
   diagram, since no fixed vocabulary can represent six independently
   typed relations without dropping some.
+- **Synonym/stub cloud** — clusters of name-close `status: "stub"`
+  roles (e.g. `Laundry Attendant` / `Laundry Attendant / Linen
+  Attendant`), for the reconciliation LiveView facet described in §11 —
+  close nodes drawn visually close, so a human picks the canonical
+  spelling by looking at a picture instead of scanning the import
+  summary's flat `stub_roles` list.
 
 Each lens module implements the same shape: take the canonical graph
 (plus any lens-specific options, e.g. a root for `MindMap`), return
@@ -905,6 +916,66 @@ strength, set by a physical drag gesture rather than typing a number.
   reproduce.
 - An additional entry mode alongside §4's LiveView form and CSV import,
   not a replacement for either.
+
+### Stub/near-duplicate reconciliation view
+
+Surfaced by a real import, not hypothetical: the Bangkok Scope workbook
+(27 differentiated roles) auto-created 114 stub roles (§2's "Stub
+roles") for cross-referenced targets outside that batch — a noticeable
+fraction of which are the same real-world role spelled multiple ways
+across different sheets (e.g. `Laundry Attendant` / `Laundry Attendant
+/ Linen Attendant` / `Laundry/Linen Attendant`; `Domestic Maid` /
+`Domestic Maid / Private Housekeeper`; `Kitchen Steward` / `Steward /
+Kitchen Steward`). The stub-creation design always accepted this as a
+known tradeoff — "caught, not prevented" via the import summary's
+`stub_roles` list (§4) — but a flat text list stops being a usable
+reconciliation tool once the count is in the hundreds.
+
+Proposed shape (not built):
+
+- A LiveView facet, alongside the existing single-role edit form (§4),
+  that clusters `status: "stub"` roles by name closeness — starting
+  with simple string distance (e.g. Jaro-Winkler/edit distance) as a
+  first pass, potentially upgraded to Nx-embedding closeness once §7
+  exists — and lets a human decide, per cluster: which is canonical;
+  which are true synonyms of it (folded into the canonical role's
+  `Synonym` subdocuments, same mechanism as any other synonym); and
+  which are merely *related* rather than identical (kept as separate
+  roles, linked via `sibling`/`type_of` with the usual
+  `weight`/`relationship_detail`, not merged away).
+- Visualized via a new Choreo lens (§8) rendering these clusters as a
+  graph/cloud rather than a flat list — close nodes drawn visually
+  close together — so the reconciliation decision is made by looking
+  at a picture, not scanning a table. Same "distance expresses
+  closeness" idea as the Concentric-circle drag UI above; could
+  plausibly reuse that interaction pattern (drag to merge/separate)
+  rather than inventing a new one.
+- Open question, not resolved here: is "how close are these two
+  spellings" the same kind of number as `RoleRelation.weight` (§2/§5 —
+  reserved for match-relevance between already-distinct roles), or a
+  different metric entirely (name/string/embedding similarity used
+  only during reconciliation, then discarded once a merge/separate
+  decision is made)? "Should Bartender's hard-negative weight toward
+  Barista be 0.8" and "are 'Laundry Attendant' and 'Laundry/Linen
+  Attendant' the same role" are conceptually different questions —
+  leaning toward the latter needing its own signal rather than
+  overloading `weight`, but not deciding that now.
+
+**Multiple LiveView views over the same data**, not just the one
+existing single-role form — this reconciliation facet is one of
+several worth planning for eventually:
+
+- **Role list** — today there's only `RoleLive`'s one-role-at-a-time
+  edit form (§4); a browse/list view over all roles is the natural
+  companion, not yet built.
+- **Synonym/stub cloud** — the reconciliation view above.
+- **Truth tuples** — a raw view of `Data.Reasoning.Store`'s
+  materialized `Knowledge` (§5) for a given catalog: every base and
+  derived fact (`related/2`, `excluded/2`, `eligible/2`,
+  `flagged_for_review/2`, etc.) as literal tuples, for debugging/
+  auditing what the reasoning layer currently believes. Valuable
+  independent of any Choreo lens, since it's the ground truth a lens
+  would be rendering *from*.
 
 ### Explorer + Parquet for larger-scale data handling
 

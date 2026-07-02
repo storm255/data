@@ -171,13 +171,29 @@ defmodule Data.SkillTaxonomy.RowBuilder do
       "locale" => fields.locale,
       "industry" => fields.industry,
       "status" => "differentiated",
-      "synonyms" => Enum.map(fields.synonyms, &synonym_doc(&1, fields.locale))
+      "synonyms" => build_synonym_docs(fields.synonyms, fields.locale)
     }
 
     case fields.description do
       "" -> base
       description -> Map.put(base, "description", description)
     end
+  end
+
+  # Deduped by term — every synonym_doc/2 call here shares the same
+  # locale (fields.locale; there's no per-item locale in this module,
+  # see the moduledoc), so two entries that normalize to the same term
+  # would otherwise produce two Synonym subdocuments with the identical
+  # Lexical key ({term, locale}) embedded in one Role document mutation.
+  # TerminusDB rejects that outright (`SameDocumentIdsMutatedInOneTransaction`)
+  # — this happens for real when two differently-worded synonyms happen
+  # to share an identical local-language translation (XLSX import's
+  # per-row local_term expansion, design doc §2). Keeps the first
+  # occurrence's confidence when duplicates disagree.
+  defp build_synonym_docs(synonyms, locale) do
+    synonyms
+    |> Enum.map(&synonym_doc(&1, locale))
+    |> Enum.uniq_by(& &1["term"])
   end
 
   defp synonym_doc(term, locale) when is_binary(term) do

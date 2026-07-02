@@ -207,5 +207,27 @@ defmodule Data.SkillTaxonomy.RowBuilderTest do
                }
              ]
     end
+
+    test "two distinct synonym entries that resolve to the same (term, locale) are deduped, not embedded twice" do
+      # TerminusDB rejects mutating the same subdocument id twice in one
+      # document — this happens for real when two different English
+      # synonyms happen to share an identical local-language translation
+      # (XLSX import's per-row local_term expansion, design doc §2).
+      input =
+        fields(
+          synonyms: [
+            %{term: "Specialist Cook", confidence: "sure"},
+            %{term: "กุ๊กเฉพาะทาง", confidence: "sure"},
+            %{term: "Specialty Cook", confidence: "sure"},
+            %{term: "กุ๊กเฉพาะทาง", confidence: "sure"}
+          ],
+          hard_negatives: ["Barista"]
+        )
+
+      assert {:ok, result} = RowBuilder.build(input)
+
+      terms = Enum.map(result.role["synonyms"], & &1["term"]) |> Enum.sort()
+      assert terms == Enum.sort(["Specialist Cook", "Specialty Cook", "กุ๊กเฉพาะทาง"])
+    end
   end
 end
