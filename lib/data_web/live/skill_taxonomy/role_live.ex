@@ -3,8 +3,8 @@ defmodule DataWeb.SkillTaxonomy.RoleLive do
   LiveView entry form for one role's skill-taxonomy cluster (see
   `design/SKILLS_TAXONOMY.md` §4) — the interactive counterpart to
   `Data.SkillTaxonomy.CsvImporter`. Builds and imports through the same
-  `Data.SkillTaxonomy.RowBuilder` + `Data.SkillTaxonomy.CsvImporter.import/2`
-  the CSV path uses, so the two entry paths can't drift apart.
+  `Data.SkillTaxonomy.RowBuilder` + `Data.SkillTaxonomy.Importer.import/2`
+  the CSV (and XLSX) path uses, so the entry paths can't drift apart.
 
   The `TerminusDB.Config` used comes from the connect session
   (`"terminus_config"`), falling back to `Data.TerminusDB.config/0` —
@@ -14,7 +14,7 @@ defmodule DataWeb.SkillTaxonomy.RoleLive do
 
   use DataWeb, :live_view
 
-  alias Data.SkillTaxonomy.{CsvImporter, RoleLoader, RowBuilder}
+  alias Data.SkillTaxonomy.{Importer, RoleLoader, RowBuilder}
 
   @impl true
   def mount(_params, session, socket) do
@@ -89,7 +89,7 @@ defmodule DataWeb.SkillTaxonomy.RoleLive do
     with true <- base_role_ok?(socket.assigns.config, fields),
          {:ok, built} <- RowBuilder.build(fields, base_role_exists?: true),
          parsed = to_parsed(built),
-         {:ok, _summary} <- CsvImporter.import(socket.assigns.config, parsed) do
+         {:ok, _summary} <- Importer.import(socket.assigns.config, parsed) do
       {:noreply,
        socket
        |> put_flash(:info, "Saved #{fields.primary}.")

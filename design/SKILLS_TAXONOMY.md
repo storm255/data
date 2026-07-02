@@ -145,7 +145,14 @@ referencing row supplied (§4's `Local-language term` column), rather
 than left empty — a target's translated name belongs to *that role*,
 not to the relationship pointing at it, so it's stored the same way any
 other synonym is (`Synonym` subdocument), reusable by every relation
-that ever points at this role, not re-typed per edge.
+that ever points at this role, not re-typed per edge. `Synonym.locale`
+is required by schema, but the template's `Local-language term` column
+never asks for a language code for that term (just the text) — the
+seeded synonym currently uses the placeholder locale `"local"` rather
+than guessing a code, until/unless the template grows an explicit
+per-term locale column. **Open decision** (§10): is `"local"` the right
+placeholder, or should this be revisited before it accumulates real
+data?
 
 ### Context-dependent variants (e.g. a 5-star-hotel Waiter vs. a diner Waiter)
 
@@ -270,16 +277,23 @@ exactly the kind of provenance TerminusDB is good at and ExDatalog's
 
 ---
 
-## 4. Data entry — LiveView + CSV/spreadsheet import
+## 4. Data entry — LiveView + CSV/XLSX import
 
-Two entry paths, sharing one document-building function so validation
+Three entry paths, sharing one document-building function so validation
 rules live in one place — actually `Data.SkillTaxonomy.RowBuilder`, not
-either entry-path module itself. `RowBuilder.build/2` is pure and
-operates on already-structured fields (real lists, not `;`-delimited
-strings), so it doesn't know or care which entry path called it; each
-caller only handles what's specific to it (CSV cell-splitting and
-cross-row checks for `CsvImporter`; live TerminusDB lookups for
-`RoleLive`).
+any entry-path module itself. `RowBuilder.build/2` is pure and operates
+on already-structured fields (real lists — plain strings or, for
+per-item confidence/notes/relationship_detail/local-language-term
+fidelity, rich `%{term:, confidence:, notes:, relationship_detail:,
+local_term:}` maps — never `;`-delimited strings), so it doesn't know or
+care which entry path called it; each caller only handles what's
+specific to it (CSV cell-splitting and cross-row checks for
+`CsvImporter`; sheet/table parsing for `XlsxImporter`; live TerminusDB
+lookups for `RoleLive`). The actual TerminusDB writes — common to all
+three paths — live in a fourth module, `Data.SkillTaxonomy.Importer`
+(`import/2`), taking any of the other three's output as-is; see below
+and §5's note on why `RoleRelation.from`/`to` can't be built without a
+network round trip.
 
 - **CSV/spreadsheet import** — one row per primary role (matching the
   guide's "work one primary role at a time"), columns mirroring the
@@ -291,9 +305,9 @@ cross-row checks for `CsvImporter`; live TerminusDB lookups for
   splits cells and handles cross-row checks (duplicate role identity,
   whether a `context` row's base role exists elsewhere in the file),
   then calls `RowBuilder.build/2` per row to get `Role`/`Skill` document
-  maps plus relations pending resolution against real TerminusDB ids;
-  `import/2` performs the actual insert — see §5's note on why
-  `RoleRelation.from`/`to` can't be built without a network round trip.
+  maps plus relations pending resolution against real TerminusDB ids.
+  CSV cells are always plain strings, so this path never produces rich
+  term maps — that's the XLSX importer's job.
 
   - `description` — free-text semantic summary of the role (§2).
   - `context` — optional venue-tier/setting qualifier (e.g.
@@ -307,24 +321,35 @@ cross-row checks for `CsvImporter`; live TerminusDB lookups for
     row with no matching blank-context row for the same `primary` is an
     import error (the base role must exist before a variant of it can).
 
+- **XLSX import** (`Data.SkillTaxonomy.XlsxImporter`, planned — not yet
+  built) — reads the reformed template (one Role Summary header block
+  plus one Term-Level Matching Detail table per role sheet, see the
+  "Whats New" sheet in the generated workbook for the full rationale)
+  and produces the same `parsed()` shape `CsvImporter.parse/1` does, so
+  `Importer.import/2` doesn't need to know which path produced it. This
+  is the path that actually exercises `RowBuilder`'s rich term maps —
+  the Term-Level table's Local-language term/Relationship
+  detail/Matching note/Confidence columns become each row's
+  `local_term`/`relationship_detail`/`notes`/`confidence`.
+
 - **LiveView form** (`DataWeb.SkillTaxonomy.RoleLive`) — one block per
   guide section (Primary, Description, Context, Synonyms, Supporting,
   Type-of/Sibling, Hard Negatives, Easy Negatives, Exclusions), each a
   dynamic add/remove list where relevant, plus locale/industry/confidence
   fields per entry. On save, calls `RowBuilder.build/2` (checking
   `base_role_exists?` via a live `Document.query` when `context` is set)
-  then `CsvImporter.import/2` directly — no separate "LiveView import"
+  then `Importer.import/2` directly — no separate "LiveView import"
   function; a single role is just a `parsed()` result with one `Role` in
   it. Editing an existing role uses `Data.SkillTaxonomy.RoleLoader.fetch/2`,
   `RowBuilder`'s inverse, to pre-fill the form from what's already stored.
 
-Both paths write through `TerminusDB.Document.insert`/`replace` using
+All paths write through `TerminusDB.Document.insert`/`replace` using
 `Data.TerminusDB.config/1`, matching the pattern already established for
 this project's TerminusDB integration.
 
 ### Cross-batch reference resolution: query, else stub-create
 
-`import/2` resolves a relation's `from`/`to` in three steps, in order:
+`Importer.import/2` resolves a relation's `from`/`to` in three steps, in order:
 (1) the current batch's own documents, (2) an exact-match live query
 against TerminusDB for an already-differentiated or already-stubbed
 role of that `{primary_name, context}`, (3) if neither finds it,
@@ -668,16 +693,21 @@ lens doesn't have to be refactored to make room for the second.
 1. **Done.** TerminusDB schema (`Role`, `Skill`, `RoleRelation`, plus the
    `Synonym` subdocument) in `Data.TerminusDB.Schema.classes/0`; synced
    and verified live via `mix terminus.setup`.
-2. **Done.** `Data.SkillTaxonomy.CsvImporter` (`parse/1` + `import/2`),
-   built on the shared `Data.SkillTaxonomy.RowBuilder`.
+2. **Done.** `Data.SkillTaxonomy.CsvImporter.parse/1` and the
+   format-agnostic `Data.SkillTaxonomy.Importer.import/2`, both built on
+   the shared `Data.SkillTaxonomy.RowBuilder` (which now also accepts
+   rich per-item term maps, for the XLSX path below).
 3. **Done.** `DataWeb.SkillTaxonomy.RoleLive` entry form, on the same
    `RowBuilder` plus `Data.SkillTaxonomy.RoleLoader` for the edit path.
-4. `Data.Reasoning.Catalogs.SkillTaxonomy` + `Loaders.SkillTaxonomy`,
+4. `Data.SkillTaxonomy.XlsxImporter.parse/1` against the reformed
+   template (§4), producing the same `parsed()` shape `CsvImporter`
+   does so `Importer.import/2` needs no changes to consume it.
+5. `Data.Reasoning.Catalogs.SkillTaxonomy` + `Loaders.SkillTaxonomy`,
    validated against a small real dataset (5–10 hand-entered roles).
-5. Measure symbolic-only match quality against real data; decide whether
+6. Measure symbolic-only match quality against real data; decide whether
    §7 Phase C is warranted.
-6. (Conditional) Nx contrastive projection.
-7. Choreo visualization.
+7. (Conditional) Nx contrastive projection.
+8. Choreo visualization.
 
 ---
 
@@ -701,6 +731,12 @@ lens doesn't have to be refactored to make room for the second.
 - **`heeero_core` integration** — standalone for now. If pursued later,
   expected shape is an API service this app exposes, gated on
   performance being good enough to justify it — not a code port/merge.
+- **Locale for stub-seeded local-language synonyms** — `Importer.import/2`
+  seeds a stub role's `Synonym` with the placeholder locale `"local"`
+  (§2's "Stub roles") since the template's `Local-language term` column
+  carries no language code. Revisit if this needs to be queryable by
+  actual locale later (e.g. `"th"`), which would mean either adding a
+  per-term locale column to the template or inferring one some other way.
 
 ---
 

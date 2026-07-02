@@ -3,7 +3,7 @@ defmodule DataWeb.SkillTaxonomy.RoleLiveTest do
 
   import Phoenix.LiveViewTest
 
-  alias Data.SkillTaxonomy.CsvImporter
+  alias Data.SkillTaxonomy.{CsvImporter, Importer}
 
   # Injected via the connect session (see RoleLive's moduledoc) — the same
   # stub-adapter pattern used by CsvImporter's/RoleLoader's tests, so no
@@ -145,7 +145,7 @@ defmodule DataWeb.SkillTaxonomy.RoleLiveTest do
       )
       |> TerminusDB.Config.with_database("test_db")
 
-    {:ok, _} = CsvImporter.import(csv_config, parsed)
+    {:ok, _} = Importer.import(csv_config, parsed)
     csv_bodies = Agent.get(agent2, & &1) |> Enum.reverse()
 
     live_view_roles = Enum.filter(live_view_bodies, &(&1["@type"] == "Role"))

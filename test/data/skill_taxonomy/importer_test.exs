@@ -1,7 +1,7 @@
-defmodule Data.SkillTaxonomy.CsvImporterImportTest do
+defmodule Data.SkillTaxonomy.ImporterTest do
   use ExUnit.Case, async: true
 
-  alias Data.SkillTaxonomy.CsvImporter
+  alias Data.SkillTaxonomy.Importer
 
   # The adapter intercepts the fully-encoded Req request; `req.body` is
   # iodata (Jason's encoder output), not a plain binary — flatten before
@@ -58,7 +58,7 @@ defmodule Data.SkillTaxonomy.CsvImporterImportTest do
         end
       end)
 
-    assert {:ok, _summary} = CsvImporter.import(config, parsed_fixture())
+    assert {:ok, _summary} = Importer.import(config, parsed_fixture())
 
     calls = Agent.get(agent, & &1) |> Enum.reverse()
 
@@ -93,7 +93,7 @@ defmodule Data.SkillTaxonomy.CsvImporterImportTest do
         end
       end)
 
-    assert {:ok, _} = CsvImporter.import(config, parsed_fixture())
+    assert {:ok, _} = Importer.import(config, parsed_fixture())
 
     methods = Agent.get(agent, & &1) |> Enum.map(fn {method, _body} -> method end) |> Enum.uniq()
     assert methods == [:put]
@@ -118,7 +118,7 @@ defmodule Data.SkillTaxonomy.CsvImporterImportTest do
         end
       end)
 
-    assert {:ok, _summary} = CsvImporter.import(config, parsed_fixture())
+    assert {:ok, _summary} = Importer.import(config, parsed_fixture())
 
     types =
       Agent.get(agent, & &1)
@@ -142,7 +142,87 @@ defmodule Data.SkillTaxonomy.CsvImporterImportTest do
         end
       end)
 
-    assert {:error, _reason} = CsvImporter.import(config, parsed_fixture())
+    assert {:error, _reason} = Importer.import(config, parsed_fixture())
+  end
+
+  test "a pending relation's notes and relationship_detail land on the RoleRelation document" do
+    {:ok, agent} = Agent.start_link(fn -> [] end)
+
+    config =
+      stub_config(fn method, body ->
+        Agent.update(agent, &[{method, body} | &1])
+
+        case body do
+          %{"@type" => "Role"} ->
+            {200, ["terminusdb:///data/Role/stub-role-id"]}
+
+          %{"@type" => "Skill"} ->
+            {200, ["terminusdb:///data/Skill/stub-skill-id"]}
+
+          %{"@type" => "RoleRelation"} ->
+            {200, ["terminusdb:///data/RoleRelation/stub-relation-id"]}
+        end
+      end)
+
+    fixture = %{
+      parsed_fixture()
+      | pending_relations: [
+          %{
+            from: {:role, "Bartender", ""},
+            to: {:skill, "cocktail prep"},
+            relation_type: "supporting",
+            confidence: "sure",
+            notes: "Core signal for the role.",
+            relationship_detail: "primary tool skill"
+          }
+        ]
+    }
+
+    assert {:ok, _summary} = Importer.import(config, fixture)
+
+    relation_body =
+      Agent.get(agent, & &1)
+      |> Enum.reverse()
+      |> Enum.find_value(fn
+        {:put, %{"@type" => "RoleRelation"} = body} -> body
+        _ -> nil
+      end)
+
+    assert relation_body["notes"] == "Core signal for the role."
+    assert relation_body["relationship_detail"] == "primary tool skill"
+  end
+
+  test "a pending relation without notes/relationship_detail omits those keys from the RoleRelation document" do
+    {:ok, agent} = Agent.start_link(fn -> [] end)
+
+    config =
+      stub_config(fn method, body ->
+        Agent.update(agent, &[{method, body} | &1])
+
+        case body do
+          %{"@type" => "Role"} ->
+            {200, ["terminusdb:///data/Role/stub-role-id"]}
+
+          %{"@type" => "Skill"} ->
+            {200, ["terminusdb:///data/Skill/stub-skill-id"]}
+
+          %{"@type" => "RoleRelation"} ->
+            {200, ["terminusdb:///data/RoleRelation/stub-relation-id"]}
+        end
+      end)
+
+    assert {:ok, _summary} = Importer.import(config, parsed_fixture())
+
+    relation_body =
+      Agent.get(agent, & &1)
+      |> Enum.reverse()
+      |> Enum.find_value(fn
+        {:put, %{"@type" => "RoleRelation"} = body} -> body
+        _ -> nil
+      end)
+
+    refute Map.has_key?(relation_body, "notes")
+    refute Map.has_key?(relation_body, "relationship_detail")
   end
 
   describe "stub-creating unresolved role targets" do
@@ -195,7 +275,7 @@ defmodule Data.SkillTaxonomy.CsvImporterImportTest do
         end)
 
       fixture = fixture_with_unresolved_target([hard_negative("Domestic Maid")])
-      assert {:ok, summary} = CsvImporter.import(config, fixture)
+      assert {:ok, summary} = Importer.import(config, fixture)
       assert summary.stub_roles == [{"Domestic Maid", ""}]
 
       stub_body =
@@ -217,6 +297,46 @@ defmodule Data.SkillTaxonomy.CsvImporterImportTest do
         end)
 
       assert relation_body["to"] == "Role/domestic-maid-id"
+    end
+
+    test "a relation carrying local_term seeds the newly-created stub's synonyms" do
+      {:ok, agent} = Agent.start_link(fn -> [] end)
+
+      config =
+        stub_config(fn method, body ->
+          Agent.update(agent, &[{method, body} | &1])
+
+          case body do
+            %{"query" => %{"@type" => "Role"}} ->
+              {200, []}
+
+            %{"@type" => "Role", "primary_name" => "Bartender"} ->
+              {200, ["terminusdb:///data/Role/bartender-id"]}
+
+            %{"@type" => "Role", "primary_name" => "Domestic Maid"} ->
+              {200, ["terminusdb:///data/Role/domestic-maid-id"]}
+
+            %{"@type" => "RoleRelation"} ->
+              {200, ["terminusdb:///data/RoleRelation/stub-relation-id"]}
+          end
+        end)
+
+      relation = Map.put(hard_negative("Domestic Maid"), :local_term, "แม่บ้านบ้านส่วนตัว")
+      fixture = fixture_with_unresolved_target([relation])
+      assert {:ok, summary} = Importer.import(config, fixture)
+      assert summary.stub_roles == [{"Domestic Maid", ""}]
+
+      stub_body =
+        Agent.get(agent, & &1)
+        |> Enum.reverse()
+        |> Enum.find_value(fn
+          {:put, %{"@type" => "Role", "primary_name" => "Domestic Maid"} = body} -> body
+          _ -> nil
+        end)
+
+      assert stub_body["synonyms"] == [
+               %{"@type" => "Synonym", "term" => "แม่บ้านบ้านส่วนตัว", "locale" => "local"}
+             ]
     end
 
     test "found via live query -> resolves to the existing document, no stub created" do
@@ -246,7 +366,7 @@ defmodule Data.SkillTaxonomy.CsvImporterImportTest do
         end)
 
       fixture = fixture_with_unresolved_target([hard_negative("Domestic Maid")])
-      assert {:ok, summary} = CsvImporter.import(config, fixture)
+      assert {:ok, summary} = Importer.import(config, fixture)
       assert summary.stub_roles == []
 
       role_puts =
@@ -299,7 +419,7 @@ defmodule Data.SkillTaxonomy.CsvImporterImportTest do
       ]
 
       fixture = fixture_with_unresolved_target(relations)
-      assert {:ok, summary} = CsvImporter.import(config, fixture)
+      assert {:ok, summary} = Importer.import(config, fixture)
       assert summary.stub_roles == [{"Domestic Maid", ""}]
 
       stub_puts =
@@ -328,7 +448,7 @@ defmodule Data.SkillTaxonomy.CsvImporterImportTest do
         end)
 
       fixture = fixture_with_unresolved_target([hard_negative("Domestic Maid")])
-      assert {:error, _reason} = CsvImporter.import(config, fixture)
+      assert {:error, _reason} = Importer.import(config, fixture)
     end
   end
 end
