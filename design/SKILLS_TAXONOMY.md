@@ -208,7 +208,13 @@ exactly the kind of provenance TerminusDB is good at and ExDatalog's
 ## 4. Data entry — LiveView + CSV/spreadsheet import
 
 Two entry paths, sharing one document-building function so validation
-rules live in one place:
+rules live in one place — actually `Data.SkillTaxonomy.RowBuilder`, not
+either entry-path module itself. `RowBuilder.build/2` is pure and
+operates on already-structured fields (real lists, not `;`-delimited
+strings), so it doesn't know or care which entry path called it; each
+caller only handles what's specific to it (CSV cell-splitting and
+cross-row checks for `CsvImporter`; live TerminusDB lookups for
+`RoleLive`).
 
 - **CSV/spreadsheet import** — one row per primary role (matching the
   guide's "work one primary role at a time"), columns mirroring the
@@ -216,10 +222,12 @@ rules live in one place:
   context, synonyms, supporting, type_of, sibling, hard_negatives,
   easy_negatives, exclusions, locale, industry, confidence`, with
   list-columns delimited (`;`). `Data.SkillTaxonomy.CsvImporter.parse/1`
-  turns rows into `Role`/`Skill` document maps plus relations pending
-  resolution against real TerminusDB ids; `import/2` performs the actual
-  insert — see §5's note on why `RoleRelation.from`/`to` can't be built
-  by `parse/1` alone.
+  splits cells and handles cross-row checks (duplicate role identity,
+  whether a `context` row's base role exists elsewhere in the file),
+  then calls `RowBuilder.build/2` per row to get `Role`/`Skill` document
+  maps plus relations pending resolution against real TerminusDB ids;
+  `import/2` performs the actual insert — see §5's note on why
+  `RoleRelation.from`/`to` can't be built without a network round trip.
 
   - `description` — free-text semantic summary of the role (§2).
   - `context` — optional venue-tier/setting qualifier (e.g.
@@ -237,8 +245,12 @@ rules live in one place:
   guide section (Primary, Description, Context, Synonyms, Supporting,
   Type-of/Sibling, Hard Negatives, Easy Negatives, Exclusions), each a
   dynamic add/remove list where relevant, plus locale/industry/confidence
-  fields per entry. Submits through the same document-building function
-  the CSV importer uses.
+  fields per entry. On save, calls `RowBuilder.build/2` (checking
+  `base_role_exists?` via a live `Document.query` when `context` is set)
+  then `CsvImporter.import/2` directly — no separate "LiveView import"
+  function; a single role is just a `parsed()` result with one `Role` in
+  it. Editing an existing role uses `Data.SkillTaxonomy.RoleLoader.fetch/2`,
+  `RowBuilder`'s inverse, to pre-fill the form from what's already stored.
 
 Both paths write through `TerminusDB.Document.insert`/`replace` using
 `Data.TerminusDB.config/1`, matching the pattern already established for
@@ -488,11 +500,13 @@ lens doesn't have to be refactored to make room for the second.
 
 ## 8. Phased roadmap
 
-1. TerminusDB schema (`Role`, `Skill`, `RoleRelation`) in
-   `Data.TerminusDB.Schema.classes/0`; `mix terminus.setup` sync.
-2. `Data.SkillTaxonomy.CsvImporter` + shared document-building logic.
-3. `DataWeb.SkillTaxonomy.RoleLive` entry form, reusing the same
-   document-building logic.
+1. **Done.** TerminusDB schema (`Role`, `Skill`, `RoleRelation`, plus the
+   `Synonym` subdocument) in `Data.TerminusDB.Schema.classes/0`; synced
+   and verified live via `mix terminus.setup`.
+2. **Done.** `Data.SkillTaxonomy.CsvImporter` (`parse/1` + `import/2`),
+   built on the shared `Data.SkillTaxonomy.RowBuilder`.
+3. **Done.** `DataWeb.SkillTaxonomy.RoleLive` entry form, on the same
+   `RowBuilder` plus `Data.SkillTaxonomy.RoleLoader` for the edit path.
 4. `Data.Reasoning.Catalogs.SkillTaxonomy` + `Loaders.SkillTaxonomy`,
    validated against a small real dataset (5–10 hand-entered roles).
 5. Measure symbolic-only match quality against real data; decide whether

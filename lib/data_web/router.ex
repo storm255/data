@@ -26,6 +26,13 @@ defmodule DataWeb.Router do
     get "/", PageController, :home
   end
 
+  scope "/skill_taxonomy", DataWeb.SkillTaxonomy do
+    pipe_through :browser
+
+    live "/roles/new", RoleLive, :new
+    live "/roles/edit", RoleLive, :edit
+  end
+
   # Other scopes may use custom stacks.
   # scope "/api", DataWeb do
   #   pipe_through :api

@@ -1,0 +1,110 @@
+defmodule Data.SkillTaxonomy.RowBuilderTest do
+  use ExUnit.Case, async: true
+
+  alias Data.SkillTaxonomy.RowBuilder
+
+  defp fields(overrides) do
+    Map.merge(
+      %{
+        primary: "Bartender",
+        description: "",
+        context: "",
+        synonyms: [],
+        supporting: [],
+        type_of: [],
+        sibling: [],
+        hard_negatives: [],
+        easy_negatives: [],
+        exclusions: [],
+        locale: "en",
+        industry: "hospitality/F&B",
+        confidence: "guess"
+      },
+      Map.new(overrides)
+    )
+  end
+
+  test "builds a role document, relations per list field, and skill documents for supporting targets" do
+    input =
+      fields(
+        synonyms: ["barkeep", "barman"],
+        supporting: ["cocktail prep"],
+        sibling: ["Barista"],
+        hard_negatives: ["Barista", "Waiter"],
+        easy_negatives: ["Landscaping"],
+        confidence: "sure"
+      )
+
+    assert {:ok, result} = RowBuilder.build(input)
+
+    assert result.role["@type"] == "Role"
+    assert result.role["primary_name"] == "Bartender"
+    assert result.role["context"] == ""
+
+    assert Enum.sort_by(result.role["synonyms"], & &1["term"]) == [
+             %{"@type" => "Synonym", "term" => "barkeep", "locale" => "en"},
+             %{"@type" => "Synonym", "term" => "barman", "locale" => "en"}
+           ]
+
+    assert length(result.relations) == 5
+
+    assert result.relations |> Enum.map(& &1.relation_type) |> Enum.sort() ==
+             ["easy_negative", "hard_negative", "hard_negative", "sibling", "supporting"]
+
+    supporting = Enum.find(result.relations, &(&1.relation_type == "supporting"))
+    assert supporting.from == {:role, "Bartender", ""}
+    assert supporting.to == {:skill, "cocktail prep"}
+    assert supporting.confidence == "sure"
+
+    assert result.skills == [%{"@type" => "Skill", "name" => "cocktail prep"}]
+  end
+
+  test "missing primary is an error" do
+    assert {:error, message} = RowBuilder.build(fields(primary: ""))
+    assert message =~ "primary"
+  end
+
+  test "invalid confidence is an error" do
+    assert {:error, message} = RowBuilder.build(fields(confidence: "maybe"))
+    assert message =~ "confidence"
+  end
+
+  test "blank confidence defaults to guess" do
+    assert {:ok, result} = RowBuilder.build(fields(confidence: "", hard_negatives: ["Barista"]))
+    assert Enum.all?(result.relations, &(&1.confidence == "guess"))
+  end
+
+  test "a non-blank context with base_role_exists?: true builds a variant role plus an auto type_of relation" do
+    input = fields(context: "fine_dining", supporting: ["wine service"])
+
+    assert {:ok, result} = RowBuilder.build(input, base_role_exists?: true)
+    assert result.role["context"] == "fine_dining"
+
+    auto = Enum.find(result.relations, &(&1.relation_type == "type_of"))
+    assert auto.from == {:role, "Bartender", "fine_dining"}
+    assert auto.to == {:role, "Bartender", ""}
+  end
+
+  test "a non-blank context with base_role_exists?: false (or omitted) is an error" do
+    input = fields(context: "fine_dining")
+
+    assert {:error, message} = RowBuilder.build(input)
+    assert message =~ "base"
+
+    assert {:error, _} = RowBuilder.build(input, base_role_exists?: false)
+  end
+
+  test "warnings for fewer than 2 synonyms and 0 hard negatives" do
+    assert {:ok, result} = RowBuilder.build(fields(synonyms: ["barkeep"]))
+    assert Enum.any?(result.warnings, &(&1 =~ "synonym"))
+    assert Enum.any?(result.warnings, &(&1 =~ "hard negative"))
+  end
+
+  test "description is included only when present" do
+    assert {:ok, with_description} = RowBuilder.build(fields(description: "Serves drinks"))
+    assert with_description.role["description"] == "Serves drinks"
+
+    assert {:ok, without} = RowBuilder.build(fields(description: ""))
+    refute Map.has_key?(without.role, "description")
+  end
+end

@@ -11,39 +11,30 @@ defmodule Data.SkillTaxonomy.CsvImporter do
 
   - `parse/1` is pure — CSV in, `Role`/`Skill` document maps and
     *pending* relations (addressed by natural key, not yet a real `@id`)
-    out. No network.
+    out. No network. Per-row document building delegates to
+    `Data.SkillTaxonomy.RowBuilder`, shared with the LiveView entry
+    form; this module only handles what's CSV-specific (splitting
+    `;`-delimited cells, and the cross-row checks `RowBuilder` can't do
+    on its own: duplicate role identity, whether a `context` row's base
+    role exists elsewhere in the same file).
   - `import/2` performs the actual TerminusDB writes: inserts roles and
     skills first, reads the `@id` each insert response returns, then
     builds and inserts `RoleRelation` documents from those real ids.
   """
 
+  alias Data.SkillTaxonomy.RowBuilder
   alias NimbleCSV.RFC4180, as: CSV
 
   @columns ~w(primary description context synonyms supporting type_of sibling
               hard_negatives easy_negatives exclusions locale industry confidence)a
 
   @column_names Enum.map(@columns, &Atom.to_string/1)
-
-  @relation_columns %{
-    supporting: "supporting",
-    type_of: "type_of",
-    sibling: "sibling",
-    hard_negatives: "hard_negative",
-    easy_negatives: "easy_negative",
-    exclusions: "exclusion"
-  }
-
-  @type pending_relation :: %{
-          from: {:role, String.t(), String.t()},
-          to: {:role, String.t(), String.t()} | {:skill, String.t()},
-          relation_type: String.t(),
-          confidence: String.t()
-        }
+  @list_columns ~w(synonyms supporting type_of sibling hard_negatives easy_negatives exclusions)a
 
   @type parsed :: %{
           roles: [map()],
           skills: [map()],
-          pending_relations: [pending_relation()],
+          pending_relations: [RowBuilder.pending_relation()],
           warnings: [%{row: pos_integer(), message: String.t()}],
           errors: [%{row: pos_integer(), message: String.t()}]
         }
@@ -96,12 +87,12 @@ defmodule Data.SkillTaxonomy.CsvImporter do
 
     base_role_names =
       rows
-      |> Enum.filter(fn {_row, fields} -> fields["context"] == "" end)
-      |> MapSet.new(fn {_row, fields} -> fields["primary"] end)
+      |> Enum.filter(fn {_row, raw} -> raw["context"] == "" end)
+      |> MapSet.new(fn {_row, raw} -> raw["primary"] end)
 
     duplicate_keys =
       rows
-      |> Enum.map(fn {_row, fields} -> {fields["primary"], fields["context"]} end)
+      |> Enum.map(fn {_row, raw} -> {raw["primary"], raw["context"]} end)
       |> Enum.frequencies()
       |> Enum.filter(fn {_key, count} -> count > 1 end)
       |> MapSet.new(fn {key, _count} -> key end)
@@ -113,29 +104,24 @@ defmodule Data.SkillTaxonomy.CsvImporter do
     |> dedupe_skills()
   end
 
-  defp process_row({row_num, fields}, acc, base_role_names, duplicate_keys) do
-    primary = fields["primary"]
-    context = fields["context"]
+  defp process_row({row_num, raw}, acc, base_role_names, duplicate_keys) do
+    primary = raw["primary"]
+    context = raw["context"]
 
-    with :ok <- validate_primary(primary),
-         :ok <- validate_not_duplicate(primary, context, duplicate_keys),
-         :ok <- validate_base_role(primary, context, base_role_names),
-         {:ok, confidence} <- validate_confidence(fields["confidence"]) do
-      build_row(row_num, fields, confidence, acc)
-    else
+    case validate_not_duplicate(primary, context, duplicate_keys) do
+      :ok ->
+        fields = to_row_builder_fields(raw)
+        base_role_exists? = MapSet.member?(base_role_names, primary)
+
+        case RowBuilder.build(fields, base_role_exists?: base_role_exists?) do
+          {:ok, built} -> merge_built(acc, row_num, built)
+          {:error, message} -> add_error(acc, row_num, primary, message)
+        end
+
       {:error, message} ->
-        %{
-          acc
-          | errors: acc.errors ++ [%{row: row_num, primary: nullify(primary), message: message}]
-        }
+        add_error(acc, row_num, primary, message)
     end
   end
-
-  defp nullify(""), do: nil
-  defp nullify(value), do: value
-
-  defp validate_primary(""), do: {:error, "primary is required"}
-  defp validate_primary(_primary), do: :ok
 
   defp validate_not_duplicate(primary, context, duplicate_keys) do
     if MapSet.member?(duplicate_keys, {primary, context}) do
@@ -145,113 +131,17 @@ defmodule Data.SkillTaxonomy.CsvImporter do
     end
   end
 
-  defp validate_base_role(_primary, "", _base_role_names), do: :ok
-
-  defp validate_base_role(primary, _context, base_role_names) do
-    if MapSet.member?(base_role_names, primary) do
-      :ok
-    else
-      {:error,
-       "no base role found for #{inspect(primary)} — the base (blank-context) row must exist first"}
-    end
-  end
-
-  defp validate_confidence(""), do: {:ok, "guess"}
-  defp validate_confidence(value) when value in ["sure", "guess"], do: {:ok, value}
-
-  defp validate_confidence(value),
-    do: {:error, "invalid confidence #{inspect(value)} — expected \"sure\" or \"guess\""}
-
-  defp build_row(row_num, fields, confidence, acc) do
-    primary = fields["primary"]
-    context = fields["context"]
-
-    synonyms = split_list(fields["synonyms"])
-    hard_negatives = split_list(fields["hard_negatives"])
-
-    role = build_role_doc(fields, synonyms)
-    relations = build_relations(fields, primary, context, confidence)
-
-    skills =
-      relations
-      |> Enum.map(& &1.to)
-      |> Enum.filter(&match?({:skill, _}, &1))
-      |> Enum.map(&skill_doc/1)
-
-    relations =
-      if context == "" do
-        relations
-      else
-        [auto_type_of_relation(primary, context, confidence) | relations]
-      end
-
-    warnings = row_warnings(row_num, synonyms, hard_negatives)
-
+  defp to_row_builder_fields(raw) do
     %{
-      acc
-      | roles: acc.roles ++ [role],
-        skills: acc.skills ++ skills,
-        pending_relations: acc.pending_relations ++ relations,
-        warnings: acc.warnings ++ warnings
+      primary: raw["primary"],
+      description: raw["description"],
+      context: raw["context"],
+      locale: raw["locale"],
+      industry: raw["industry"],
+      confidence: raw["confidence"]
     }
+    |> Map.merge(Map.new(@list_columns, &{&1, split_list(raw[Atom.to_string(&1)])}))
   end
-
-  defp build_role_doc(fields, synonyms) do
-    base = %{
-      "@type" => "Role",
-      "primary_name" => fields["primary"],
-      "context" => fields["context"],
-      "locale" => fields["locale"],
-      "industry" => fields["industry"],
-      "synonyms" => Enum.map(synonyms, &synonym_doc(&1, fields["locale"]))
-    }
-
-    case fields["description"] do
-      "" -> base
-      description -> Map.put(base, "description", description)
-    end
-  end
-
-  defp synonym_doc(term, locale) do
-    %{"@type" => "Synonym", "term" => term, "locale" => locale}
-  end
-
-  defp build_relations(fields, primary, context, confidence) do
-    for {column, relation_type} <- @relation_columns,
-        target <- split_list(fields[Atom.to_string(column)]) do
-      %{
-        from: {:role, primary, context},
-        to: relation_target(column, target),
-        relation_type: relation_type,
-        confidence: confidence
-      }
-    end
-  end
-
-  defp relation_target(:supporting, target), do: {:skill, target}
-  defp relation_target(_column, target), do: {:role, target, ""}
-
-  defp skill_doc({:skill, name}), do: %{"@type" => "Skill", "name" => name}
-
-  defp auto_type_of_relation(primary, context, confidence) do
-    %{
-      from: {:role, primary, context},
-      to: {:role, primary, ""},
-      relation_type: "type_of",
-      confidence: confidence
-    }
-  end
-
-  defp row_warnings(row_num, synonyms, hard_negatives) do
-    []
-    |> maybe_warn(row_num, length(synonyms) < 2, "fewer than 2 synonyms")
-    |> maybe_warn(row_num, hard_negatives == [], "0 hard negatives")
-  end
-
-  defp maybe_warn(warnings, _row_num, false, _message), do: warnings
-
-  defp maybe_warn(warnings, row_num, true, message),
-    do: warnings ++ [%{row: row_num, message: message}]
 
   defp split_list(nil), do: []
 
@@ -261,6 +151,23 @@ defmodule Data.SkillTaxonomy.CsvImporter do
     |> Enum.map(&String.trim/1)
     |> Enum.reject(&(&1 == ""))
   end
+
+  defp merge_built(acc, row_num, built) do
+    %{
+      acc
+      | roles: acc.roles ++ [built.role],
+        skills: acc.skills ++ built.skills,
+        pending_relations: acc.pending_relations ++ built.relations,
+        warnings: acc.warnings ++ Enum.map(built.warnings, &%{row: row_num, message: &1})
+    }
+  end
+
+  defp add_error(acc, row_num, primary, message) do
+    %{acc | errors: acc.errors ++ [%{row: row_num, primary: nullify(primary), message: message}]}
+  end
+
+  defp nullify(""), do: nil
+  defp nullify(value), do: value
 
   defp dedupe_skills(result) do
     skills = Enum.uniq_by(result.skills, & &1["name"])

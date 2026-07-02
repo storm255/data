@@ -156,20 +156,63 @@ out of scope and require every file to be self-contained.
 
 ## Phase 3 — LiveView entry form
 
-`test/data_web/live/skill_taxonomy/role_live_test.exs`:
+**Done.** Building this surfaced that "one document-building function"
+(§4) needed to actually be extracted, not just shared by convention —
+`Data.SkillTaxonomy.CsvImporter`'s per-row logic depended on raw CSV
+strings and cross-row state the LiveView doesn't have. Split into:
 
-- Mount renders all seven guide sections as distinct form blocks.
-- Each dynamic list (synonyms, supporting, etc.) supports add/remove via
-  its own LiveView event, independently of the others.
-- Submitting a valid form calls the same document-building function as
-  the CSV importer (assert via a stubbed TerminusDB adapter that the
-  resulting `insert` payload matches what Phase 2's importer would
-  produce for equivalent input — proves the two entry paths stay in
-  sync).
-- Submitting with `primary` blank shows a validation error and does not
-  call `TerminusDB.Document.insert`.
-- Editing an existing role pre-fills every section correctly from a
-  stubbed `Document.get` response, including list-valued fields.
+- `Data.SkillTaxonomy.RowBuilder` (`test/data/skill_taxonomy/row_builder_test.exs`,
+  8 tests) — the actual shared pure function, operating on already-structured
+  fields (real lists, not `;`-delimited strings) so both `CsvImporter`
+  (after splitting a row's cells) and `RoleLive` (whose dynamic lists are
+  already lists) call the same code. Takes `base_role_exists?` as an
+  explicit option rather than deciding itself, since "exists" means
+  "elsewhere in this CSV" for one caller and "in TerminusDB, live" for
+  the other.
+- `Data.SkillTaxonomy.RoleLoader` (`test/data/skill_taxonomy/role_loader_test.exs`,
+  2 tests) — the edit-path inverse: fetches a `Role` plus its outgoing
+  `RoleRelation`s and resolves them back to display names, grouped by
+  field. Excludes the auto-generated `type_of` link back to a context
+  variant's base role (regenerated on every save; showing it as editable
+  would be misleading). Needed its own tests since `Document.get(id:
+  ...)` sends the id as a query param, not part of the URL path or
+  request body — worth getting the stub request-shape right before
+  trusting it.
+- `CsvImporter` refactored to delegate to `RowBuilder`, keeping only
+  what's genuinely CSV-specific (cell splitting, cross-row duplicate/
+  base-role checks) — reverified against its full existing test suite
+  unchanged, confirming the refactor didn't alter behavior.
+
+`test/data_web/live/skill_taxonomy/role_live_test.exs` (5 tests), via
+`Phoenix.LiveViewTest` with the same `TerminusDB.Config` `adapter:` stub
+pattern used throughout, injected through the connect session
+(`"terminus_config"`):
+
+- Mount renders all seven guide sections as distinct form blocks
+  (`fieldset[data-field=...]`).
+- Each dynamic list supports add/remove independently — proven by adding
+  to two different lists and removing from only one.
+- Submitting builds the identical `Role`/`RoleRelation` documents
+  `CsvImporter` would for equivalent input (built via a `supporting` →
+  `Skill` relation specifically, since a role-target relation like
+  `hard_negatives` would hit the documented cross-batch-reference gap in
+  a single-role fixture — not what this test is checking).
+- Submitting with `primary` blank surfaces `RowBuilder`'s validation
+  error and never reaches `CsvImporter.import/2` — confirmed via an
+  adapter that records every call it receives; the list stays empty.
+- Editing pre-fills every section, including list-valued fields, from a
+  stubbed `Document.get`/`Document.query` response pair.
+
+Verified against the real `mark-i5.mediazu.org` instance too: started
+the dev server, confirmed `GET /skill_taxonomy/roles/new` renders all
+seven sections with a 200 (the "new" path doesn't touch TerminusDB on
+mount, so nothing needed cleanup afterward). Full interactive
+create/save wasn't separately re-verified live beyond that — the save
+path is the same `RowBuilder` + `CsvImporter.import/2` already proven
+live in Phase 2, and the interactive behavior itself is exercised
+through real `Phoenix.LiveViewTest` (actual LiveView process lifecycle,
+not a bare unit call), just against a stub adapter rather than the live
+server.
 
 ## Phase 4 — Reasoning catalog and loader
 
