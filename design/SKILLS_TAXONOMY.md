@@ -409,6 +409,32 @@ Only `Role` targets need this — `supporting` is the only relation type
 targeting a `Skill`, and its target is always part of the importing
 batch's own documents already (§2).
 
+### XLSX export — `Data.SkillTaxonomy.XlsxExporter`
+
+The other direction: reads `Role`s (plus their outgoing `RoleRelation`s
+and `Synonym`s) back out of TerminusDB into the same template shape
+`XlsxImporter.parse/1` reads, so the *current* state — including
+anything adjusted through `RoleLive`, which never touches an XLSX file
+— can be handed to someone as a readable document showing the rules and
+assumptions behind a role, not just inspected through the app.
+`XlsxExporter.export/2` takes either a list of `{primary_name, context}`
+keys or `:all`; requesting a key with no matching `Role` fails the whole
+call (same "abort on first problem" behavior as `Importer.import/2` — a
+typo should be visible, not silently skipped). Target ids across every
+exported role's relations are batch-fetched once each (the same pattern
+`RoleLoader.fetch/2` already uses), not once per relation.
+
+Not a strict inverse of `parse/1` — two things genuinely can't round-trip:
+
+- **Local-language term** is written as a *second* `Synonym` on the
+  *target* role at import time (§2), not kept as relation metadata —
+  so on export, the Term-Level table's `Local-language term` column is
+  always blank; the local-language name shows up as that role's own
+  `Synonym` row instead, on that role's own sheet.
+- **End-of-role Matching Statement** and **Category Guidance** text are
+  exported with their row labels but blank content — nothing persists
+  them yet (§6 `RoleGuidance` isn't built).
+
 ---
 
 ## 5. Reasoning — `Data.Reasoning.Catalogs.SkillTaxonomy`
@@ -729,12 +755,18 @@ lens doesn't have to be refactored to make room for the second.
    reformed template (§4), producing the same `parsed()` shape
    `CsvImporter` does (plus `role_guidance`) so `Importer.import/2`
    needed no changes to consume it. Known gap: no `context` support (§4).
-5. `Data.Reasoning.Catalogs.SkillTaxonomy` + `Loaders.SkillTaxonomy`,
+5. **Done.** `Data.SkillTaxonomy.XlsxExporter.export/2` — the reverse
+   direction, TerminusDB back out to the same template shape, so
+   LiveView-adjusted data (which never touches an XLSX file otherwise)
+   can be handed to someone readable (§4). Not a strict inverse of
+   `parse/1`: `Local-language term` and role guidance text can't
+   round-trip (§4 explains why).
+6. `Data.Reasoning.Catalogs.SkillTaxonomy` + `Loaders.SkillTaxonomy`,
    validated against a small real dataset (5–10 hand-entered roles).
-6. Measure symbolic-only match quality against real data; decide whether
+7. Measure symbolic-only match quality against real data; decide whether
    §7 Phase C is warranted.
-7. (Conditional) Nx contrastive projection.
-8. Choreo visualization.
+8. (Conditional) Nx contrastive projection.
+9. Choreo visualization.
 
 ---
 
@@ -768,6 +800,16 @@ lens doesn't have to be refactored to make room for the second.
   documents per country, like the `context` mechanism? something else?)
   is still undecided, and this inference shouldn't get ahead of that.
   Revisit both together once that's decided.
+- **A "this is the local-language variant" flag on `Synonym`** — not
+  built. Right now a `Synonym` created from the Term-Level table's
+  `Local-language term` column is indistinguishable from any other
+  synonym once stored (no field marks it as *that* kind). A flag (or
+  small enum) would let `XlsxExporter` reconstruct the `Local-language
+  term` column on export instead of always leaving it blank (§4) — pick
+  the flagged synonym instead of guessing. Deliberately not added yet:
+  it's one more thing tangled up with the still-undecided multi-locale
+  model above, and guessing its shape now risks a second migration once
+  that's settled.
 
 ---
 
