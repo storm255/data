@@ -815,10 +815,44 @@ lens doesn't have to be refactored to make room for the second.
    (§5), validated live against a 7-role/5-relation real dataset —
    symmetric closure, `related/2`, `excluded/2`/`eligible/2`, and
    `flagged_for_review/2` all confirmed correct end to end.
-7. Measure symbolic-only match quality against real data; decide whether
-   §7 Phase C is warranted.
-8. (Conditional) Nx contrastive projection.
-9. Choreo visualization.
+7. **Done.** Bangkok Scope real-data import — 27 colleague-authored role
+   sheets (an independently-evolved template shape, reformatted into v3
+   first — `priv/skill_taxonomy/reformat_bangkok_scope.exs`) imported
+   live: 181 skills, 532 relations, 114 stub roles. First real bulk
+   import exercising the whole pipeline end to end; surfaced and fixed a
+   genuine `RowBuilder` gap along the way (two synonyms resolving to the
+   same `(term, locale)` produced a duplicate-subdocument-id error —
+   now deduped).
+8. **Phase 1 done** (promoted ahead of #9) — the stub/near-duplicate
+   reconciliation LiveView (§11): a meaningful fraction of the 114
+   stubs from #7 are the same real-world role spelled multiple ways
+   (e.g. `Laundry Attendant` / `Laundry Attendant / Linen Attendant`).
+   Cleaning this up with a human in the loop first means #9's
+   match-quality measurement runs against reconciled data instead of
+   measuring noise from duplicate stubs alongside real signal.
+   Built: `Data.SkillTaxonomy.Reconciliation` (pure — Jaro-distance
+   clustering on word-normalized names, calibrated against the real
+   Bangkok stub list; `already_related` exclusion so a reviewed pair
+   doesn't resurface), `Data.SkillTaxonomy.ClusterResolver` (I/O —
+   `merge/3` folds duplicates into a canonical role's synonyms and
+   repoints their relations, with self-loop and collision handling;
+   `keep_separate/4`/`mark_unrelated/3` for the other two outcomes),
+   and `DataWeb.SkillTaxonomy.ReconciliationLive`
+   (`/skill_taxonomy/reconciliation`). Verified live against a real
+   duplicate cluster on `mark-i5.mediazu.org`. **Phase 2 (the
+   drag-and-drop weight widget for "keep separate but related") is not
+   built** — the LiveView only offers merge, pick-canonical-then-merge,
+   and mark-unrelated actions; a human who decides a cluster's members
+   are related-but-genuinely-distinct (rather than duplicates or
+   unrelated) has no action to take on that decision yet. `"needs
+   manual review"` is a separate, narrower case (2+ *differentiated*
+   roles in one cluster — merging those needs their descriptions/
+   relations/guidance reconciled too, out of scope for automated
+   action either phase). See §11 for the full Phase 2 design.
+9. Measure symbolic-only match quality against real (reconciled) data;
+   decide whether §7 Phase C is warranted.
+10. (Conditional) Nx contrastive projection.
+11. Choreo visualization.
 
 ---
 
@@ -919,6 +953,12 @@ strength, set by a physical drag gesture rather than typing a number.
 
 ### Stub/near-duplicate reconciliation view
 
+**Promoted to §9 roadmap item 8** — ahead of match-quality measurement,
+per-cluster decision resolved (direct synonym merge vs. keep-separate-
+with-weight). Still captured here rather than moved wholesale, since
+it isn't yet fleshed out into an implementation plan (LiveView module
+shape, clustering algorithm choice, etc.).
+
 Surfaced by a real import, not hypothetical: the Bangkok Scope workbook
 (27 differentiated roles) auto-created 114 stub roles (§2's "Stub
 roles") for cross-referenced targets outside that batch — a noticeable
@@ -950,16 +990,19 @@ Proposed shape (not built):
   closeness" idea as the Concentric-circle drag UI above; could
   plausibly reuse that interaction pattern (drag to merge/separate)
   rather than inventing a new one.
-- Open question, not resolved here: is "how close are these two
-  spellings" the same kind of number as `RoleRelation.weight` (§2/§5 —
-  reserved for match-relevance between already-distinct roles), or a
-  different metric entirely (name/string/embedding similarity used
-  only during reconciliation, then discarded once a merge/separate
-  decision is made)? "Should Bartender's hard-negative weight toward
-  Barista be 0.8" and "are 'Laundry Attendant' and 'Laundry/Linen
-  Attendant' the same role" are conceptually different questions —
-  leaning toward the latter needing its own signal rather than
-  overloading `weight`, but not deciding that now.
+- **Resolved**: these are two different decisions, not one number.
+  Alternative spellings of the *same* role (`Laundry Attendant` /
+  `Laundry Attendant / Linen Attendant`) are a **direct synonym
+  merge** — pick the canonical spelling, fold the others into its
+  `Synonym` subdocuments, no weight involved at all, same as any other
+  synonym. `RoleRelation.weight` (§2/§5) stays reserved for its
+  original purpose: expressing closeness between roles the
+  reconciliation view (or a human) has decided are genuinely
+  *different-but-similar* (e.g. `Bartender` vs `Barista`) rather than
+  the same role spelled differently — so the reconciliation UI's core
+  decision, per cluster, is actually "is this a synonym (merge, no
+  weight) or a related-but-distinct role (keep separate, `sibling`/
+  `type_of` with a weight)?", not a single similarity slider.
 
 **Multiple LiveView views over the same data**, not just the one
 existing single-role form — this reconciliation facet is one of

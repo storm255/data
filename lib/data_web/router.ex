@@ -31,6 +31,7 @@ defmodule DataWeb.Router do
 
     live "/roles/new", RoleLive, :new
     live "/roles/edit", RoleLive, :edit
+    live "/reconciliation", ReconciliationLive, :index
   end
 
   # Other scopes may use custom stacks.
