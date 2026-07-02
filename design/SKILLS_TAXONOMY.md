@@ -147,12 +147,14 @@ not to the relationship pointing at it, so it's stored the same way any
 other synonym is (`Synonym` subdocument), reusable by every relation
 that ever points at this role, not re-typed per edge. `Synonym.locale`
 is required by schema, but the template's `Local-language term` column
-never asks for a language code for that term (just the text) — the
-seeded synonym currently uses the placeholder locale `"local"` rather
-than guessing a code, until/unless the template grows an explicit
-per-term locale column. **Open decision** (§10): is `"local"` the right
-placeholder, or should this be revisited before it accumulates real
-data?
+never asks for a language code for that term (just the text), so the
+seeded synonym's locale is inferred from the *referencing role's own*
+`locale` field (`RowBuilder`'s `role_locale`, carried on every
+`pending_relation`) rather than a fixed placeholder or a guessed code —
+the simplest available signal, deliberately not a real multi-locale
+model (see §10: how the same role existing differently across countries
+should be handled isn't decided yet, and this shouldn't get ahead of
+that decision).
 
 ### Context-dependent variants (e.g. a 5-star-hotel Waiter vs. a diner Waiter)
 
@@ -731,12 +733,16 @@ lens doesn't have to be refactored to make room for the second.
 - **`heeero_core` integration** — standalone for now. If pursued later,
   expected shape is an API service this app exposes, gated on
   performance being good enough to justify it — not a code port/merge.
-- **Locale for stub-seeded local-language synonyms** — `Importer.import/2`
-  seeds a stub role's `Synonym` with the placeholder locale `"local"`
-  (§2's "Stub roles") since the template's `Local-language term` column
-  carries no language code. Revisit if this needs to be queryable by
-  actual locale later (e.g. `"th"`), which would mean either adding a
-  per-term locale column to the template or inferring one some other way.
+- **Locale for stub-seeded local-language synonyms** — resolved for now:
+  `Importer.import/2` infers the locale from the *referencing* role's
+  own `locale` field (§2's "Stub roles") rather than a fixed placeholder,
+  since the template's `Local-language term` column carries no language
+  code of its own. Deliberately not a real multi-locale model — how the
+  same role existing differently across countries/regions should be
+  represented (one `Role` with region-tagged synonyms? separate `Role`
+  documents per country, like the `context` mechanism? something else?)
+  is still undecided, and this inference shouldn't get ahead of that.
+  Revisit both together once that's decided.
 
 ---
 

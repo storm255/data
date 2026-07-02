@@ -20,6 +20,13 @@ defmodule Data.SkillTaxonomy.RowBuilder do
   dynamic lists just supply plain strings; nothing about them needs to
   change to keep working.
 
+  Every `pending_relation()` also carries `role_locale` — the
+  *referencing* role's own `locale` field, always set (not
+  contributor-supplied per-relation). `Data.SkillTaxonomy.Importer` uses
+  it to infer what locale to tag a stub-created target role's
+  `local_term`-seeded synonym with, since the template's Local-language
+  term column carries no language code of its own (design doc §2, §10).
+
   Deliberately **not** responsible for cross-row/cross-request
   concerns — those need visibility this module doesn't have:
 
@@ -75,6 +82,7 @@ defmodule Data.SkillTaxonomy.RowBuilder do
           required(:to) => {:role, String.t(), String.t()} | {:skill, String.t()},
           required(:relation_type) => String.t(),
           required(:confidence) => String.t(),
+          required(:role_locale) => String.t(),
           optional(:notes) => String.t(),
           optional(:relationship_detail) => String.t(),
           optional(:local_term) => String.t()
@@ -195,7 +203,8 @@ defmodule Data.SkillTaxonomy.RowBuilder do
       from: {:role, fields.primary, fields.context},
       to: relation_target(key, term),
       relation_type: relation_type,
-      confidence: overrides[:confidence] || default_confidence
+      confidence: overrides[:confidence] || default_confidence,
+      role_locale: fields.locale
     }
     |> maybe_put(:notes, overrides[:notes])
     |> maybe_put(:relationship_detail, overrides[:relationship_detail])
@@ -218,7 +227,8 @@ defmodule Data.SkillTaxonomy.RowBuilder do
       from: {:role, fields.primary, fields.context},
       to: {:role, fields.primary, ""},
       relation_type: "type_of",
-      confidence: confidence
+      confidence: confidence,
+      role_locale: fields.locale
     }
   end
 

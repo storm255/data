@@ -299,7 +299,51 @@ defmodule Data.SkillTaxonomy.ImporterTest do
       assert relation_body["to"] == "Role/domestic-maid-id"
     end
 
-    test "a relation carrying local_term seeds the newly-created stub's synonyms" do
+    test "a relation carrying local_term seeds the newly-created stub's synonyms, using the referencing role's own locale" do
+      {:ok, agent} = Agent.start_link(fn -> [] end)
+
+      config =
+        stub_config(fn method, body ->
+          Agent.update(agent, &[{method, body} | &1])
+
+          case body do
+            %{"query" => %{"@type" => "Role"}} ->
+              {200, []}
+
+            %{"@type" => "Role", "primary_name" => "Bartender"} ->
+              {200, ["terminusdb:///data/Role/bartender-id"]}
+
+            %{"@type" => "Role", "primary_name" => "Domestic Maid"} ->
+              {200, ["terminusdb:///data/Role/domestic-maid-id"]}
+
+            %{"@type" => "RoleRelation"} ->
+              {200, ["terminusdb:///data/RoleRelation/stub-relation-id"]}
+          end
+        end)
+
+      relation =
+        hard_negative("Domestic Maid")
+        |> Map.put(:local_term, "แม่บ้านบ้านส่วนตัว")
+        |> Map.put(:role_locale, "th")
+
+      fixture = fixture_with_unresolved_target([relation])
+      assert {:ok, summary} = Importer.import(config, fixture)
+      assert summary.stub_roles == [{"Domestic Maid", ""}]
+
+      stub_body =
+        Agent.get(agent, & &1)
+        |> Enum.reverse()
+        |> Enum.find_value(fn
+          {:put, %{"@type" => "Role", "primary_name" => "Domestic Maid"} = body} -> body
+          _ -> nil
+        end)
+
+      assert stub_body["synonyms"] == [
+               %{"@type" => "Synonym", "term" => "แม่บ้านบ้านส่วนตัว", "locale" => "th"}
+             ]
+    end
+
+    test "a relation carrying local_term but no role_locale seeds the synonym with a blank locale, not a guess" do
       {:ok, agent} = Agent.start_link(fn -> [] end)
 
       config =
@@ -323,8 +367,7 @@ defmodule Data.SkillTaxonomy.ImporterTest do
 
       relation = Map.put(hard_negative("Domestic Maid"), :local_term, "แม่บ้านบ้านส่วนตัว")
       fixture = fixture_with_unresolved_target([relation])
-      assert {:ok, summary} = Importer.import(config, fixture)
-      assert summary.stub_roles == [{"Domestic Maid", ""}]
+      assert {:ok, _summary} = Importer.import(config, fixture)
 
       stub_body =
         Agent.get(agent, & &1)
@@ -335,7 +378,7 @@ defmodule Data.SkillTaxonomy.ImporterTest do
         end)
 
       assert stub_body["synonyms"] == [
-               %{"@type" => "Synonym", "term" => "แม่บ้านบ้านส่วนตัว", "locale" => "local"}
+               %{"@type" => "Synonym", "term" => "แม่บ้านบ้านส่วนตัว", "locale" => ""}
              ]
     end
 

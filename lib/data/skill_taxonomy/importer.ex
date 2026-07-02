@@ -110,7 +110,14 @@ defmodule Data.SkillTaxonomy.Importer do
       with {:ok, from_id, ids, stub_roles} <-
              fetch_or_create(config, ids, stub_roles, relation.from),
            {:ok, to_id, ids, stub_roles} <-
-             fetch_or_create(config, ids, stub_roles, relation.to, relation[:local_term]) do
+             fetch_or_create(
+               config,
+               ids,
+               stub_roles,
+               relation.to,
+               relation[:local_term],
+               relation[:role_locale]
+             ) do
         doc =
           %{
             "@type" => "RoleRelation",
@@ -151,13 +158,13 @@ defmodule Data.SkillTaxonomy.Importer do
   # practice (see moduledoc), but this handles Skill keys the same way
   # for robustness — just without adding to stub_roles, since a Skill
   # has no "differentiated vs stub" concept to flag.
-  defp fetch_or_create(config, ids, stub_roles, key, local_term \\ nil) do
+  defp fetch_or_create(config, ids, stub_roles, key, local_term \\ nil, role_locale \\ nil) do
     case Map.fetch(ids, key) do
       {:ok, id} ->
         {:ok, id, ids, stub_roles}
 
       :error ->
-        case resolve_or_stub(config, key, local_term) do
+        case resolve_or_stub(config, key, local_term, role_locale) do
           {:ok, id, :existing} ->
             {:ok, id, Map.put(ids, key, id), stub_roles}
 
@@ -171,7 +178,7 @@ defmodule Data.SkillTaxonomy.Importer do
     end
   end
 
-  defp resolve_or_stub(config, {:role, primary, context}, local_term) do
+  defp resolve_or_stub(config, {:role, primary, context}, local_term, role_locale) do
     query = %{"@type" => "Role", "primary_name" => primary, "context" => context}
 
     stub = %{
@@ -181,22 +188,27 @@ defmodule Data.SkillTaxonomy.Importer do
       "locale" => "",
       "industry" => "",
       "status" => "stub",
-      "synonyms" => stub_synonyms(local_term)
+      "synonyms" => stub_synonyms(local_term, role_locale)
     }
 
     query_or_create(config, query, stub)
   end
 
-  defp resolve_or_stub(config, {:skill, name}, _local_term) do
+  defp resolve_or_stub(config, {:skill, name}, _local_term, _role_locale) do
     query = %{"@type" => "Skill", "name" => name}
     stub = %{"@type" => "Skill", "name" => name}
     query_or_create(config, query, stub)
   end
 
-  defp stub_synonyms(nil), do: []
+  defp stub_synonyms(nil, _role_locale), do: []
 
-  defp stub_synonyms(term) do
-    [%{"@type" => "Synonym", "term" => term, "locale" => "local"}]
+  # role_locale is the referencing role's own locale (RowBuilder always
+  # sets it on a pending_relation) — the closest available signal for
+  # what language a local_term is likely in, absent an explicit per-term
+  # locale column on the template. Not a real multi-locale model (see
+  # design doc §10) — just avoids inventing a placeholder value.
+  defp stub_synonyms(term, role_locale) do
+    [%{"@type" => "Synonym", "term" => term, "locale" => role_locale || ""}]
   end
 
   defp query_or_create(config, query, stub) do
