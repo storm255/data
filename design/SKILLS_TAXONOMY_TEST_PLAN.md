@@ -32,52 +32,127 @@ pattern as the existing `mix terminus.setup` verification):
 
 ## Phase 2 — CSV importer
 
+Split into two functions, because `RoleRelation.from`/`to` must hold the
+exact `@id` TerminusDB assigns a `Role`/`Skill` — and that can only be
+learned from TerminusDB's own insert response, not predicted (its
+Lexical-key percent-encoding doesn't match Elixir's `URI.encode/2`; e.g.
+it leaves `&` unescaped where `URI.encode/2` would not — confirmed
+against `Banquet and Event F&B Supervisor`). So `parse/1` is pure and
+produces `Role`/`Skill` documents plus *pending* relations addressed by
+natural key, not yet a real `@id`; `import/2` does the actual TerminusDB
+round trip — insert roles/skills, read the `@id` each insert response
+returns, then build and insert `RoleRelation` documents from those.
+
+### `parse/1` — pure, no network
+
 `test/data/skill_taxonomy/csv_importer_test.exs`:
 
 - A valid single-role row (all seven guide sections populated) parses
-  into one `Role` document map and N `RoleRelation` document maps, one
-  per listed relationship, with `relation_type` set correctly per column.
+  into one `Role` document map and N pending-relation entries, one per
+  listed relationship, with `relation_type` set correctly per column,
+  and any `supporting` targets also producing a `Skill` document.
 - A file with multiple primary-role rows parses into distinct, correctly
-  separated `Role`/`RoleRelation` sets — no cross-contamination between
-  rows.
+  separated `Role`/pending-relation sets — no cross-contamination
+  between rows. `Skill` documents are deduplicated across rows (the same
+  skill named in two different roles' `supporting` column produces one
+  `Skill` document, not two).
 - List-columns (`synonyms`, `supporting`, `type_of`, `sibling`,
   `hard_negatives`, `easy_negatives`, `exclusions`) split on `;`,
   trimmed, empty entries dropped.
 - Missing `primary` column/value → import error for that row, not a
-  crash of the whole file.
+  crash of the whole file — and that row contributes no `Role`, `Skill`,
+  or pending relations to the result (errors and success are exclusive
+  per row).
+- A malformed header (missing or misnamed column, e.g. `hard_negative`
+  singular instead of `hard_negatives`) → a single top-level error for
+  the whole file, not a per-row one — a header mismatch invalidates
+  every row's column interpretation, not just one row's.
 - Fewer than 2 synonyms, or 0 hard negatives → **warning**, not a
   rejection (the guide's minimums are contributor guidance, not a system
   invariant) — assert the parsed result carries a warnings list alongside
   the data.
-- An unrecognized value in a relation-type column (e.g. a typo'd header)
-  → explicit error naming the bad column, not a silently dropped
-  relationship.
-- `confidence` defaults to `:guess` when the column is blank; explicit
-  `sure`/`guess` values pass through unchanged; anything else → error.
-- `weight` is always `1.0` on import — there is no CSV column for it (per
-  design doc §2, it's system-computed, never contributor-set); assert the
-  importer doesn't even look for a `weight` column if one happens to be
-  present in a malformed file, rather than accidentally trusting it.
+- `confidence` defaults to `"guess"` when the column is blank; explicit
+  `"sure"`/`"guess"` values pass through unchanged; anything else →
+  row-level error.
+- `weight` is never read from a column — there isn't one (per design doc
+  §2, it's system-computed, never contributor-set) — assert a
+  pending-relation entry has no `weight` key at all (it's set later, at
+  `import/2` time, not by `parse/1`).
 - A row with blank `context` produces a `Role` identified by `primary`
-  alone.
+  alone (`context: ""`).
 - A row with a non-blank `context` produces a `Role` identified by
   `primary` + `context`, distinct from the blank-context row for the
-  same `primary`, plus an auto-generated `type_of` `RoleRelation`
-  pointing at that blank-context row — assert this relation is present
-  even though it's absent from the row's own `type_of` column.
+  same `primary`, plus an auto-generated pending `type_of` relation
+  pointing at that blank-context role — assert this pending relation is
+  present even though it's absent from the row's own `type_of` column.
 - A `context` row whose `primary` has no corresponding blank-context row
   anywhere in the file → import error for that row (the base role must
-  exist first).
+  exist first). The base-role check considers *every* blank-context row
+  in the file, even one that itself separately errors as a duplicate
+  (§ below) — one row's problem shouldn't cascade into rejecting an
+  unrelated variant row.
 - Two rows with the same `primary` and the same `context` (both blank,
-  or both the same non-blank value) → import error (duplicate role
-  identity), not a silent overwrite.
+  or both the same non-blank value) → import error for both rows
+  (duplicate role identity), not a silent overwrite of one by the other.
 - `description` passes through as free text on the `Role` document,
   unvalidated beyond "present or blank" — this field is documentation,
   not something the importer should try to parse or constrain.
-- Round-trip: parsed documents passed through
-  `TerminusDB.Document.insert/3` with a stubbed `adapter:` (per the
-  `terminusdb_client` doctest pattern) produce the expected request
-  bodies — no network required for this test.
+- Each synonym's `locale` is inherited from the row's own `locale`
+  column (the CSV format has no per-synonym locale column) — documented
+  as a known simplification, not silently assumed.
+
+### `import/2` — the TerminusDB round trip
+
+`test/data/skill_taxonomy/csv_importer_import_test.exs`, using a stubbed
+`TerminusDB.Config` `adapter:` (per the `terminusdb_client` doctest
+pattern — no real network needed to test the *wiring*, since we're not
+testing TerminusDB's own encoding behavior here, only that this code
+correctly threads an insert response's `@id` into the next request):
+
+- Given a `parse/1` result with one role and one pending relation to
+  itself... (use two distinct roles in practice) — the stub returns a
+  fixed fake `@id` for each role/skill insert; assert the subsequent
+  `RoleRelation` insert request body's `from`/`to` fields match those
+  stubbed ids exactly, not a locally-reconstructed guess.
+- Role/skill insert requests happen before any relation insert request
+  (order matters — a relation can't be built until its endpoints' real
+  ids are known).
+- An insert failure partway through (stubbed error response) surfaces
+  as `{:error, _}` from `import/2` rather than silently continuing with
+  a partial import.
+- Writes go through `Document.replace(create: true)`, not
+  `Document.insert` — verified as a `:put` request in the stub. Found
+  during implementation: `insert/3` errors if the Lexical-keyed id
+  already exists, which would make re-importing the same CSV fail
+  instead of updating in place, defeating the whole point of Lexical
+  keys giving idempotent re-import for free (Phase 1). Matches how
+  `Data.TerminusDB.Setup.ensure_schema!/2` already handles this
+  elsewhere in the app.
+
+### Integration check (against the real `mark-i5.mediazu.org` instance)
+
+Not a permanent automated test — a one-off `mix run` verification, same
+pattern used to validate the Phase 1 schema — running `import/2` against
+a small real CSV excerpt and confirming the resulting `RoleRelation`
+documents' `from`/`to` actually resolve to real `Role`/`Skill` documents
+when read back. **Done** — verified with a self-contained two-role
+excerpt (Bartender/Bar Back, all four symmetric-shaped relation types),
+including running `import/2` twice to confirm the second run doesn't
+duplicate relations (8 both times). All verification documents deleted
+afterward; nothing left on the live server from this phase.
+
+**Known limitation, not yet decided:** a relation target not present in
+the *same* import batch (e.g. `Bartender`'s `sibling` column naming a
+role that isn't itself a row in this file, and wasn't imported in an
+earlier run either) fails with `{:unresolved_reference, key}` —
+`import/2` only resolves against ids from documents it just wrote in
+this call, not against anything already in TerminusDB from a prior
+import. `seed_roles.csv` doesn't hit this (every relation target in it
+is also a primary role somewhere else in the same file), but any future
+incremental/partial import could. Needs a decision before that's a real
+workflow: either look up existing documents too (a live query, not just
+this batch's insert responses), or treat cross-batch references as
+out of scope and require every file to be self-contained.
 
 ## Phase 3 — LiveView entry form
 

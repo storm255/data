@@ -215,8 +215,11 @@ rules live in one place:
   guide's blank template plus two additions: `primary, description,
   context, synonyms, supporting, type_of, sibling, hard_negatives,
   easy_negatives, exclusions, locale, industry, confidence`, with
-  list-columns delimited (`;`). A `Data.SkillTaxonomy.CsvImporter` module
-  parses rows into `Role` + `RoleRelation` document maps.
+  list-columns delimited (`;`). `Data.SkillTaxonomy.CsvImporter.parse/1`
+  turns rows into `Role`/`Skill` document maps plus relations pending
+  resolution against real TerminusDB ids; `import/2` performs the actual
+  insert — see §5's note on why `RoleRelation.from`/`to` can't be built
+  by `parse/1` alone.
 
   - `description` — free-text semantic summary of the role (§2).
   - `context` — optional venue-tier/setting qualifier (e.g.
@@ -240,6 +243,45 @@ rules live in one place:
 Both paths write through `TerminusDB.Document.insert`/`replace` using
 `Data.TerminusDB.config/1`, matching the pattern already established for
 this project's TerminusDB integration.
+
+### Cross-batch reference resolution + review (scoped, not built)
+
+`import/2` (§4/§5) currently only resolves a relation's `from`/`to`
+against documents inserted in the *same* call — a relation naming a
+role that isn't a row in the current file, and wasn't imported earlier
+either, fails outright (`{:unresolved_reference, key}`). `seed_roles.csv`
+never hits this (every relation target is also a row in the same file),
+but any future incremental import will. Two distinct risks, needing
+different handling:
+
+- **Exact match** — safe to auto-resolve. `Role` is Lexical-keyed on
+  `{primary_name, context}`, `Skill` on `name`, so an exact lookup
+  against already-imported documents has at most one result. No
+  ambiguity possible.
+- **Near-miss** — the real danger. A typo (`"Bar-Back"` vs `"Bar
+  Back"`) won't exact-match, and auto-creating whatever doesn't resolve
+  would silently produce a near-duplicate document instead of linking
+  to the one that already exists.
+
+Planned shape: on a failed exact match, search existing `Role`/`Skill`
+documents for near-matches (e.g. `String.jaro_distance/2` — built into
+Elixir, no new dependency) and return them as **candidates needing
+review** rather than writing anything for that relation. The rest of a
+batch that *did* resolve (exactly or via the current-batch lookup)
+still imports normally — an ambiguous reference blocks only itself, not
+the whole file.
+
+This is where it surfaces to a human: the LiveView CSV import flow
+(§4's LiveView form section) gets an import-review step between parse
+and commit — upload → parse → **show unresolved references with their
+candidate matches for review** → human picks the right one, creates a
+new document, or corrects the CSV → commit. `import/2`'s contract grows
+a third outcome alongside success/hard-failure to carry this: a list of
+unresolved references, each with its candidates, written nowhere yet.
+
+Not built — this section exists so the shape is agreed before the
+LiveView work (§4, Phase 3) needs it, per `SKILLS_TAXONOMY_TEST_PLAN.md`
+Phase 2's note on the same gap.
 
 ---
 
@@ -534,3 +576,55 @@ strength, set by a physical drag gesture rather than typing a number.
   reproduce.
 - An additional entry mode alongside §4's LiveView form and CSV import,
   not a replacement for either.
+
+### Explorer + Parquet for larger-scale data handling
+
+[`Explorer`](https://explorer.hexdocs.pm/Explorer.html) (Elixir dataframes,
+Rust/Polars-backed) and Parquet as a columnar storage/interchange format,
+as an alternative to hand-rolled CSV parsing and row-by-row `Enum`/`Map`
+logic once the dataset outgrows what that comfortably handles.
+
+- Most relevant to the Nx layer (§6): Explorer and Nx are designed to
+  interoperate (dataframe ↔ tensor conversion), so a training pipeline
+  loading/preprocessing embedding vectors or curated pairs at scale
+  would likely want Explorer in front of Nx rather than plain Elixir
+  data structures.
+- Parquet as an export/interchange format is a plausible complement to,
+  not a replacement for, `seed_roles.csv` — CSV stays the
+  contributor-editable entry format (spreadsheet-friendly, per §4);
+  Parquet would be for moving larger materialized datasets between this
+  app and any other tooling (compressed, columnar, faster to scan).
+- Not relevant to Phase 2 as currently scoped — the launch dataset is a
+  few dozen rows, well within what `NimbleCSV` + plain Elixir handles
+  without added complexity. Revisit if/when dataset size or Nx data
+  pipeline needs actually justify it.
+
+### LLM-mediated natural-language querying, with Datalog as the truth in the middle
+
+Use an LLM only at the two translation boundaries of a query, never for
+the reasoning itself: natural language question → **LLM translates to a
+formal Datalog query** (a goal against `Data.Reasoning.Store`, e.g.
+`{"eligible", [worker_role, job_role]}`) → **ExDatalog evaluates it —
+deterministic, repeatable, the same input always gives the same
+answer** → the structured result (optionally with `explain: true`
+provenance, §5) → **LLM rephrases that structured result as natural
+language** for the person asking.
+
+- The point is what stays *out* of the LLM's hands: the actual
+  inference. Asking an LLM "does this candidate match this job" directly
+  is exactly the unreliable, non-reproducible thing the whole symbolic
+  layer (§5) exists to avoid. Here the LLM only ever translates at the
+  edges — question in, answer out — never computes the answer itself.
+  The "truth" — eligible/excluded and why — is always whatever ExDatalog
+  actually derived, byte-for-byte reproducible from the same facts.
+  Repeatability is the entire premise of the RBAC/SkillTaxonomy scaffold
+  already built (§5); this idea preserves that instead of trading it
+  away for conversational convenience.
+- `req_llm` (added to `mix.exs` for the §10 word-cloud idea above)
+  is the natural fit for both translation calls.
+- Failure mode to design for, not yet decided: what happens when the
+  LLM produces a malformed or nonsensical Datalog goal from an ambiguous
+  question. Validation (`ExDatalog.validate/1`, already proven in the
+  RBAC catalog) gives a structural safety net — a bad goal fails loudly
+  rather than silently returning a wrong answer — but the UX for "I
+  couldn't turn that into a query" isn't designed yet.
