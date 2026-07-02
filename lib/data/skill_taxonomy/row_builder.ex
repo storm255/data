@@ -11,6 +11,15 @@ defmodule Data.SkillTaxonomy.RowBuilder do
   submission (its dynamic add/remove lists are already real lists, no
   splitting needed). Neither caller duplicates validation rules.
 
+  Each list item in `fields()` (synonyms, supporting, hard negatives,
+  etc.) can be a plain string (the row-level `confidence` applies, no
+  `notes`/`relationship_detail`/`local_term`) or a **rich map** —
+  `%{term:, confidence:, notes:, relationship_detail:, local_term:}`,
+  all but `term` optional — for callers with per-item data, like the
+  XLSX term-level table (design doc §2/§4). CSV rows and LiveView
+  dynamic lists just supply plain strings; nothing about them needs to
+  change to keep working.
+
   Deliberately **not** responsible for cross-row/cross-request
   concerns — those need visibility this module doesn't have:
 
@@ -34,28 +43,41 @@ defmodule Data.SkillTaxonomy.RowBuilder do
     manual_review: "manual_review"
   }
 
+  @type rich_synonym :: %{required(:term) => String.t(), optional(:confidence) => String.t()}
+
+  @type rich_relation_term :: %{
+          required(:term) => String.t(),
+          optional(:confidence) => String.t(),
+          optional(:notes) => String.t(),
+          optional(:relationship_detail) => String.t(),
+          optional(:local_term) => String.t()
+        }
+
   @type fields :: %{
           primary: String.t(),
           description: String.t(),
           context: String.t(),
-          synonyms: [String.t()],
-          supporting: [String.t()],
-          type_of: [String.t()],
-          sibling: [String.t()],
-          hard_negatives: [String.t()],
-          easy_negatives: [String.t()],
-          exclusions: [String.t()],
-          manual_review: [String.t()],
+          synonyms: [String.t() | rich_synonym()],
+          supporting: [String.t() | rich_relation_term()],
+          type_of: [String.t() | rich_relation_term()],
+          sibling: [String.t() | rich_relation_term()],
+          hard_negatives: [String.t() | rich_relation_term()],
+          easy_negatives: [String.t() | rich_relation_term()],
+          exclusions: [String.t() | rich_relation_term()],
+          manual_review: [String.t() | rich_relation_term()],
           locale: String.t(),
           industry: String.t(),
           confidence: String.t()
         }
 
   @type pending_relation :: %{
-          from: {:role, String.t(), String.t()},
-          to: {:role, String.t(), String.t()} | {:skill, String.t()},
-          relation_type: String.t(),
-          confidence: String.t()
+          required(:from) => {:role, String.t(), String.t()},
+          required(:to) => {:role, String.t(), String.t()} | {:skill, String.t()},
+          required(:relation_type) => String.t(),
+          required(:confidence) => String.t(),
+          optional(:notes) => String.t(),
+          optional(:relationship_detail) => String.t(),
+          optional(:local_term) => String.t()
         }
 
   @type built :: %{
@@ -150,19 +172,41 @@ defmodule Data.SkillTaxonomy.RowBuilder do
     end
   end
 
-  defp synonym_doc(term, locale), do: %{"@type" => "Synonym", "term" => term, "locale" => locale}
+  defp synonym_doc(term, locale) when is_binary(term) do
+    %{"@type" => "Synonym", "term" => term, "locale" => locale}
+  end
+
+  defp synonym_doc(%{term: term} = rich, locale) do
+    base = %{"@type" => "Synonym", "term" => term, "locale" => locale}
+    maybe_put(base, "confidence", rich[:confidence])
+  end
 
   defp build_relations(fields, confidence) do
     for {key, relation_type} <- @relation_kinds,
-        target <- Map.fetch!(fields, key) do
-      %{
-        from: {:role, fields.primary, fields.context},
-        to: relation_target(key, target),
-        relation_type: relation_type,
-        confidence: confidence
-      }
+        item <- Map.fetch!(fields, key) do
+      build_relation(fields, key, relation_type, item, confidence)
     end
   end
+
+  defp build_relation(fields, key, relation_type, item, default_confidence) do
+    {term, overrides} = normalize_item(item)
+
+    %{
+      from: {:role, fields.primary, fields.context},
+      to: relation_target(key, term),
+      relation_type: relation_type,
+      confidence: overrides[:confidence] || default_confidence
+    }
+    |> maybe_put(:notes, overrides[:notes])
+    |> maybe_put(:relationship_detail, overrides[:relationship_detail])
+    |> maybe_put(:local_term, overrides[:local_term])
+  end
+
+  defp normalize_item(term) when is_binary(term), do: {term, %{}}
+  defp normalize_item(%{term: term} = rich), do: {term, Map.delete(rich, :term)}
+
+  defp maybe_put(map, _key, nil), do: map
+  defp maybe_put(map, key, value), do: Map.put(map, key, value)
 
   defp relation_target(:supporting, target), do: {:skill, target}
   defp relation_target(_key, target), do: {:role, target, ""}

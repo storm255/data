@@ -102,7 +102,12 @@ distinct entities. That gives two node kinds and six relation kinds:
   `primary_name`), `industry`, `description` (free-text semantic summary
   of the role — human documentation today, candidate embedding input for
   the Nx layer later), `status: "differentiated" | "stub"` (see below),
-  `synonyms: [{term, locale}]` (an attribute list, not edges).
+  `synonyms: [{term, locale, confidence}]` (an attribute list, not edges
+  — `confidence` optional, same `sure`/`guess` vocabulary as relations,
+  since the guide tags every entry, synonyms included),
+  `keywords: [{category, phrase}]` (an attribute list — the "App
+  Keywords/Job Phrases" section, §4; `category` is one of
+  `worker_profile | employer_job_post | local_language | trend_signal`).
 - **Skill** — a capability, cert, or ability; not itself a job.
   `slug`, `name`.
 
@@ -134,6 +139,13 @@ Skills don't get this treatment — `supporting` is the only relation
 type that targets a `Skill`, and its target is always part of the
 importing batch's own documents already, so there's no cross-batch
 "skill doesn't exist yet" gap the way there is for roles.
+
+A stub's `synonyms` are seeded from whatever local-language term the
+referencing row supplied (§4's `Local-language term` column), rather
+than left empty — a target's translated name belongs to *that role*,
+not to the relationship pointing at it, so it's stored the same way any
+other synonym is (`Synonym` subdocument), reusable by every relation
+that ever points at this role, not re-typed per edge.
 
 ### Context-dependent variants (e.g. a 5-star-hotel Waiter vs. a diner Waiter)
 
@@ -172,6 +184,26 @@ Every relation instance carries `confidence: :sure | :guess` plus optional
 `locale`, `industry`, and `notes`, exactly as the guide's "tag every entry"
 section requires.
 
+### `relationship_detail` — nuance without a bigger enum
+
+Real contributor data shows "related role" isn't one thing — a parent
+category, a same-level sibling, and a loosely-related specialist
+("Turndown Attendant... usually evening-specific") all show up under
+the same heading, distinguished only in free text. Rather than growing
+`relation_type` to cover every shade (every addition becomes a new case
+every Datalog rule has to account for), `RoleRelation` carries an
+optional `relationship_detail` — the free text preserved verbatim (e.g.
+`"parent category"`, `"sibling role"`, `"related specialist,
+evening-specific"`), independent of `notes` (`relationship_detail` is
+*what kind*; `notes` is *why it matters for matching*). Structural
+classification into `type_of`/`sibling` still happens — via one narrow,
+explicit heuristic (an unambiguous "parent"/"type of" signal in the
+source text; `sibling` otherwise) — but the full nuance survives in
+`relationship_detail` even when that classification is approximate.
+This isn't general prose-to-rule extraction (§6 territory, and
+explicitly not trusted without review) — just preserving text a human
+already wrote, verbatim, next to a best-effort category.
+
 ### Weight
 
 Every relation also carries `weight: float (0.0–1.0), default 1.0`. This is
@@ -201,17 +233,18 @@ over separately (§4) so exclusions can be audited independently, echoing
 
 ## 3. Storage — TerminusDB schema
 
-Three top-level document classes, plus `Synonym` as an embedded
-subdocument of `Role` (four `Class` entries total) — implemented in
-`Data.TerminusDB.Schema.classes/0` (`lib/data/terminus_db/schema.ex`) and
-synced via `mix terminus.setup`. Verified live against
-`mark-i5.mediazu.org`.
+Three top-level document classes, plus `Synonym` and `Keyword` as
+embedded subdocuments of `Role` (five `Class` entries total) —
+implemented in `Data.TerminusDB.Schema.classes/0`
+(`lib/data/terminus_db/schema.ex`) and synced via `mix terminus.setup`.
+Verified live against `mark-i5.mediazu.org`.
 
 ```
 Role
   @id (Lexical: primary_name + context), primary_name, context, locale, industry, description
   status          # "differentiated" | "stub" — see §2's "Stub roles"
-  synonyms: {"@type" => "Set", "@class" => "Synonym"}   # embedded subdocuments: {term, locale}
+  synonyms: {"@type" => "Set", "@class" => "Synonym"}   # embedded subdocuments: {term, locale, confidence?}
+  keywords: {"@type" => "Set", "@class" => "Keyword"}   # embedded subdocuments: {category, phrase}
 
 Skill
   @id, name
@@ -222,6 +255,7 @@ RoleRelation
   relation_type   # "supporting" | "type_of" | "sibling" | "hard_negative" | "easy_negative" | "exclusion" | "manual_review"
   confidence      # "sure" | "guess"
   weight          # float, 0.0-1.0, default 1.0 — system-computed (Nx, §7), never contributor-set
+  relationship_detail   # optional — free-text nuance, see §2
   locale          # optional
   industry        # optional
   notes           # optional

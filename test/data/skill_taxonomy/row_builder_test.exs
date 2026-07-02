@@ -117,4 +117,95 @@ defmodule Data.SkillTaxonomy.RowBuilderTest do
     assert {:ok, without} = RowBuilder.build(fields(description: ""))
     refute Map.has_key?(without.role, "description")
   end
+
+  describe "rich term maps (per-item confidence/notes/relationship_detail/local_term)" do
+    test "a relation list item can be a rich map instead of a plain string" do
+      input =
+        fields(
+          confidence: "guess",
+          hard_negatives: [
+            %{
+              term: "Domestic Maid",
+              confidence: "sure",
+              notes: "Private home work differs from hotel room turnover.",
+              relationship_detail: "do not auto-match",
+              local_term: "แม่บ้านบ้านส่วนตัว"
+            }
+          ]
+        )
+
+      assert {:ok, result} = RowBuilder.build(input)
+      assert [relation] = result.relations
+
+      assert relation.to == {:role, "Domestic Maid", ""}
+      assert relation.confidence == "sure"
+      assert relation.notes == "Private home work differs from hotel room turnover."
+      assert relation.relationship_detail == "do not auto-match"
+      assert relation.local_term == "แม่บ้านบ้านส่วนตัว"
+    end
+
+    test "a rich map without confidence falls back to the row-level default" do
+      input =
+        fields(
+          confidence: "guess",
+          sibling: [%{term: "Public Area Attendant", relationship_detail: "sibling role"}]
+        )
+
+      assert {:ok, result} = RowBuilder.build(input)
+      assert [relation] = result.relations
+      assert relation.confidence == "guess"
+      assert relation.relationship_detail == "sibling role"
+      refute Map.has_key?(relation, :notes)
+      refute Map.has_key?(relation, :local_term)
+    end
+
+    test "plain strings still work unchanged, with no notes/relationship_detail/local_term keys" do
+      input = fields(hard_negatives: ["Barista"])
+
+      assert {:ok, result} = RowBuilder.build(input)
+      assert [relation] = result.relations
+      assert relation.to == {:role, "Barista", ""}
+      refute Map.has_key?(relation, :notes)
+      refute Map.has_key?(relation, :relationship_detail)
+      refute Map.has_key?(relation, :local_term)
+    end
+
+    test "a rich map works for supporting (skill target) too" do
+      input =
+        fields(
+          supporting: [
+            %{term: "guest room cleaning", confidence: "sure", notes: "Core signal for the role."}
+          ]
+        )
+
+      assert {:ok, result} = RowBuilder.build(input)
+      assert [relation] = result.relations
+      assert relation.to == {:skill, "guest room cleaning"}
+      assert relation.confidence == "sure"
+      assert relation.notes == "Core signal for the role."
+      assert result.skills == [%{"@type" => "Skill", "name" => "guest room cleaning"}]
+    end
+
+    test "synonyms can be rich maps carrying per-synonym confidence" do
+      input =
+        fields(
+          synonyms: ["barkeep", %{term: "barman", confidence: "guess"}],
+          hard_negatives: ["Barista"]
+        )
+
+      assert {:ok, result} = RowBuilder.build(input)
+
+      synonyms = Enum.sort_by(result.role["synonyms"], & &1["term"])
+
+      assert synonyms == [
+               %{"@type" => "Synonym", "term" => "barkeep", "locale" => "en"},
+               %{
+                 "@type" => "Synonym",
+                 "term" => "barman",
+                 "locale" => "en",
+                 "confidence" => "guess"
+               }
+             ]
+    end
+  end
 end

@@ -5,7 +5,7 @@ defmodule Data.TerminusDB.Schema do
 
   Currently the skill taxonomy schema (see `design/SKILLS_TAXONOMY.md` §3):
   `Role`, `Skill`, and `RoleRelation` as top-level document classes, plus
-  `Synonym` as an embedded subdocument of `Role`.
+  `Synonym` and `Keyword` as embedded subdocuments of `Role`.
 
   `relation_type`, `confidence`, and other string-valued fields are plain
   `xsd:string` rather than a TerminusDB `Enum` class — the small, fixed set
@@ -18,7 +18,7 @@ defmodule Data.TerminusDB.Schema do
   @doc "Returns the list of `Class` document maps that make up the schema."
   @spec classes() :: [map()]
   def classes do
-    [synonym(), role(), skill(), role_relation()]
+    [synonym(), keyword(), role(), skill(), role_relation()]
   end
 
   # Embedded subdocument of Role.synonyms — an alternate name for a role in
@@ -31,7 +31,25 @@ defmodule Data.TerminusDB.Schema do
       "@subdocument" => [],
       "@key" => %{"@type" => "Lexical", "@fields" => ["term", "locale"]},
       "term" => "xsd:string",
-      "locale" => "xsd:string"
+      "locale" => "xsd:string",
+      "confidence" => %{"@type" => "Optional", "@class" => "xsd:string"}
+    }
+  end
+
+  # Embedded subdocument of Role.keywords — the "App Keywords / Job
+  # Phrases" section (design doc §4): free-text search/discovery phrases,
+  # not relationship data. `category` is one of "worker_profile" |
+  # "employer_job_post" | "local_language" | "trend_signal", validated in
+  # Elixir like other small string enums (see moduledoc). Lexical-keyed on
+  # {category, phrase} for the same re-assert idempotency as Synonym.
+  defp keyword do
+    %{
+      "@type" => "Class",
+      "@id" => "Keyword",
+      "@subdocument" => [],
+      "@key" => %{"@type" => "Lexical", "@fields" => ["category", "phrase"]},
+      "category" => "xsd:string",
+      "phrase" => "xsd:string"
     }
   end
 
@@ -54,7 +72,8 @@ defmodule Data.TerminusDB.Schema do
       "industry" => "xsd:string",
       "description" => %{"@type" => "Optional", "@class" => "xsd:string"},
       "status" => "xsd:string",
-      "synonyms" => %{"@type" => "Set", "@class" => "Synonym"}
+      "synonyms" => %{"@type" => "Set", "@class" => "Synonym"},
+      "keywords" => %{"@type" => "Set", "@class" => "Keyword"}
     }
   end
 
@@ -84,6 +103,7 @@ defmodule Data.TerminusDB.Schema do
       "relation_type" => "xsd:string",
       "confidence" => "xsd:string",
       "weight" => "xsd:decimal",
+      "relationship_detail" => %{"@type" => "Optional", "@class" => "xsd:string"},
       "locale" => %{"@type" => "Optional", "@class" => "xsd:string"},
       "industry" => %{"@type" => "Optional", "@class" => "xsd:string"},
       "notes" => %{"@type" => "Optional", "@class" => "xsd:string"}
