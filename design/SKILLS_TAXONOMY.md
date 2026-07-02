@@ -439,6 +439,9 @@ Not a strict inverse of `parse/1` — two things genuinely can't round-trip:
 
 ## 5. Reasoning — `Data.Reasoning.Catalogs.SkillTaxonomy`
 
+**Done** — catalog, loader, and a live validation against a small
+real dataset, all described below.
+
 A new catalog on the existing scaffold (`Data.Reasoning.Catalog`,
 `Data.Reasoning.Store`, `Data.Reasoning.Loader` — see
 `lib/data/reasoning/`, validated end-to-end with
@@ -451,6 +454,18 @@ loaded at all (e.g. a loader policy could skip `:guess`-confidence
 relations), not reasoning over the fact itself — but `weight` is
 reasoning-relevant (thresholding, ranking), so it's the one field that
 needs to be a first-class column in the Datalog tuple.
+
+**Weight representation: scaled integer, Datalog-side only.** ExDatalog
+has no float term type at all (`ExDatalog.Term.const/1` raises on any
+float) — a hard engine limitation, not a policy choice. `weight` stays
+exactly what it's always been everywhere else (an `xsd:decimal` in
+TerminusDB, an Elixir float in application code — `1.0` today, whatever
+§7's Nx layer eventually computes, later): `Loaders.SkillTaxonomy` is
+the only place this matters, converting each weight to an integer
+(`round(weight * 1000)`) purely for the fact tuple it hands to
+`ExDatalog.materialize/2`. This isn't a workaround for today's `1.0`
+placeholder specifically — it'll still be necessary once real weights
+exist, since the engine's limitation doesn't go away.
 
 **Symmetric closure.** The guide authors relationships from one role's
 perspective ("what gets wrongly suggested for *this* role"), but matching
@@ -469,17 +484,18 @@ stay directional (no closure rule).
 **Relations:**
 
 - Base (loaded facts): `supporting/3`, `type_of/3`, `sibling/3`,
-  `hard_negative/3`, `easy_negative/3`, `exclusion/3` — each
-  `{from, to, weight}`.
+  `hard_negative/3`, `easy_negative/3`, `exclusion/3`, `manual_review/3`
+  — each `{from, to, weight}`.
 - Derived, positive: `hard_negative_sym/3`, `sibling_sym/3`,
-  `exclusion_sym/3`; `related/2` — transitive closure over `type_of` +
-  `sibling_sym`, the basis for a future "domain depth" ranking signal
-  (structurally identical to the `ancestor`/`reachable` pattern already
-  proven with RBAC). `related/2` stays arity 2 for now — combining
-  per-hop weights into a path weight (e.g. via `{:mul, ...}` constraints
-  chained across recursive steps) is deferred to whenever §7 actually
-  produces non-1.0 weights to combine; no point designing that
-  aggregation before there's real data to shape it against.
+  `exclusion_sym/3`, `easy_negative_sym/3`, `manual_review_sym/3`;
+  `related/2` — transitive closure over `type_of` + `sibling_sym`, the
+  basis for a future "domain depth" ranking signal (structurally
+  identical to the `ancestor`/`reachable` pattern already proven with
+  RBAC). `related/2` stays arity 2 for now — combining per-hop weights
+  into a path weight (e.g. via `{:mul, ...}` constraints chained across
+  recursive steps) is deferred to whenever §7 actually produces non-1.0
+  weights to combine; no point designing that aggregation before
+  there's real data to shape it against.
 - Derived, negated: `excluded/2` — true if a candidate pair is caught by
   `hard_negative_sym`, `easy_negative_sym`, or `exclusion_sym`, regardless
   of weight (while every weight defaults to `1.0`, this is equivalent to
@@ -491,6 +507,17 @@ stay directional (no closure rule).
   negation. `candidate → excluded → eligible` is a DAG with no cycle
   through the negative edge, so this is trivially stratifiable — no
   different in kind from the RBAC catalog's rules.
+- Derived, positive, independent of `excluded`/`eligible`:
+  `flagged_for_review/2` — true if a candidate pair is caught by
+  `manual_review_sym`. Deliberately **not** folded into `excluded` —
+  `manual_review`'s whole point (relation-kinds table above) is "flag
+  for human judgment rather than a hard rule," so it must not silently
+  auto-block a match the way `hard_negative`/`exclusion` do. A caller
+  checks `eligible/2` and `flagged_for_review/2` independently: a pair
+  can be eligible *and* flagged, meaning "matchable, but surface it for
+  a human to confirm" — the app layer is expected to highlight this
+  visually and prompt for review rather than silently matching or
+  silently blocking.
 
 Note on scope: `hard_negative` and `easy_negative` feed the same
 `excluded` derivation (a deliberate simplification — the guide's
@@ -523,10 +550,22 @@ and/or the Nx layer (§7) actually happen — left open until one of those
 is decided. This catalog's job, either way, is the gate, not candidate
 generation.
 
-**Loader:** `Data.Reasoning.Loaders.SkillTaxonomy` implements
-`Data.Reasoning.Loader`, reading `Role`/`Skill`/`RoleRelation` documents
-via `TerminusDB.Document.stream/2` and dispatching each `RoleRelation` to
-its fact relation by `relation_type`.
+**Loader:** `Data.Reasoning.Loaders.SkillTaxonomy` (**done**) implements
+`Data.Reasoning.Loader`, reading every `RoleRelation` document via
+`TerminusDB.Document.get(type: "RoleRelation", as_list: true)` (not
+`Document.stream/2` — nothing else in this app uses `stream/2` yet, it
+has no established test-stubbing pattern, and this project's expected
+scale doesn't need it; `get/2` matches every other module's proven
+pattern) and dispatching each one to its fact relation by
+`relation_type`, which already matches the catalog's relation names
+one-to-one. `Role`/`Skill` documents themselves turned out not to be
+needed — `RoleRelation.from`/`to`/`weight` alone are everything the
+base facts require; `candidate/2` stays externally supplied (above), not
+something this loader builds from role/skill data.
+`facts/1` takes an explicit `TerminusDB.Config` for testability (the
+same pattern every other TerminusDB-touching module in this app uses);
+`facts/0` — the actual `Data.Reasoning.Loader` callback — delegates to
+it using `Data.TerminusDB.config/0`.
 
 **Magic sets note:** `related/2` (positive, recursive) is a legitimate
 future magic-sets candidate if the catalog grows large — a goal like
@@ -761,8 +800,10 @@ lens doesn't have to be refactored to make room for the second.
    can be handed to someone readable (§4). Not a strict inverse of
    `parse/1`: `Local-language term` and role guidance text can't
    round-trip (§4 explains why).
-6. `Data.Reasoning.Catalogs.SkillTaxonomy` + `Loaders.SkillTaxonomy`,
-   validated against a small real dataset (5–10 hand-entered roles).
+6. **Done.** `Data.Reasoning.Catalogs.SkillTaxonomy` + `Loaders.SkillTaxonomy`
+   (§5), validated live against a 7-role/5-relation real dataset —
+   symmetric closure, `related/2`, `excluded/2`/`eligible/2`, and
+   `flagged_for_review/2` all confirmed correct end to end.
 7. Measure symbolic-only match quality against real data; decide whether
    §7 Phase C is warranted.
 8. (Conditional) Nx contrastive projection.
