@@ -323,16 +323,40 @@ network round trip.
     row with no matching blank-context row for the same `primary` is an
     import error (the base role must exist before a variant of it can).
 
-- **XLSX import** (`Data.SkillTaxonomy.XlsxImporter`, planned — not yet
-  built) — reads the reformed template (one Role Summary header block
-  plus one Term-Level Matching Detail table per role sheet, see the
+- **XLSX import** (`Data.SkillTaxonomy.XlsxImporter`) — reads the
+  reformed template (one Role Summary header block plus one Term-Level
+  Matching Detail table per role sheet — one sheet is one role — see the
   "Whats New" sheet in the generated workbook for the full rationale)
-  and produces the same `parsed()` shape `CsvImporter.parse/1` does, so
-  `Importer.import/2` doesn't need to know which path produced it. This
-  is the path that actually exercises `RowBuilder`'s rich term maps —
-  the Term-Level table's Local-language term/Relationship
-  detail/Matching note/Confidence columns become each row's
-  `local_term`/`relationship_detail`/`notes`/`confidence`.
+  and produces the same `parsed()` shape `CsvImporter.parse/1` does
+  (plus `role_guidance`, below), so `Importer.import/2` doesn't need to
+  know which path produced it. Sections are found by row-label search,
+  not fixed row offsets, so a contributor's edited copy can drift from
+  the generated layout without breaking parsing. This is the path that
+  actually exercises `RowBuilder`'s rich term maps — the Term-Level
+  table's Local-language term/Relationship detail/Matching
+  note/Confidence columns become each row's
+  `local_term`/`relationship_detail`/`notes`/`confidence`. A `Synonym`
+  row's `Local-language term` becomes a *second* `Synonym` on the role,
+  not a translation of the first — neither column is assumed more
+  canonical, since a role's "real" name might turn out to be the
+  local-language one.
+
+  **Known gap**: no way to represent a `context` variant (the
+  "Context-dependent variants" case above) — the template has no
+  per-sheet field for it, so every XLSX-imported role gets `context:
+  ""`. Left as-is for now rather than reopening the template right after
+  sending it out for feedback; revisit if/when the template grows a
+  Context row.
+
+  **Role guidance** — the `End-of-role Matching Statement` and Category
+  Guidance block's `Expanded Detail`/`Heeero matching logic` text are
+  prose, not raw taxonomy facts (same scope as §6's `RoleGuidance`).
+  `XlsxImporter.parse/1` doesn't turn them into `Role`/`RoleRelation`
+  fields, but doesn't discard them either — they're captured in the
+  parse result's `role_guidance` list so the detail survives until §6's
+  interpretation pipeline exists to actually use it. `Importer.import/2`
+  doesn't read this key yet — there's nowhere in TerminusDB for it to go
+  until §6 is built.
 
 - **LiveView form** (`DataWeb.SkillTaxonomy.RoleLive`) — one block per
   guide section (Primary, Description, Context, Synonyms, Supporting,
@@ -701,9 +725,10 @@ lens doesn't have to be refactored to make room for the second.
    rich per-item term maps, for the XLSX path below).
 3. **Done.** `DataWeb.SkillTaxonomy.RoleLive` entry form, on the same
    `RowBuilder` plus `Data.SkillTaxonomy.RoleLoader` for the edit path.
-4. `Data.SkillTaxonomy.XlsxImporter.parse/1` against the reformed
-   template (§4), producing the same `parsed()` shape `CsvImporter`
-   does so `Importer.import/2` needs no changes to consume it.
+4. **Done.** `Data.SkillTaxonomy.XlsxImporter.parse/1` against the
+   reformed template (§4), producing the same `parsed()` shape
+   `CsvImporter` does (plus `role_guidance`) so `Importer.import/2`
+   needed no changes to consume it. Known gap: no `context` support (§4).
 5. `Data.Reasoning.Catalogs.SkillTaxonomy` + `Loaders.SkillTaxonomy`,
    validated against a small real dataset (5–10 hand-entered roles).
 6. Measure symbolic-only match quality against real data; decide whether
