@@ -4,7 +4,7 @@ defmodule Data.SkillTaxonomy.CsvImporterTest do
   alias Data.SkillTaxonomy.CsvImporter
 
   @columns ~w(primary description context synonyms supporting type_of sibling
-              hard_negatives easy_negatives exclusions locale industry confidence)a
+              hard_negatives easy_negatives exclusions manual_review locale industry confidence)a
 
   @header Enum.join(@columns, ",") <> "\n"
 
@@ -36,6 +36,7 @@ defmodule Data.SkillTaxonomy.CsvImporterTest do
             sibling: "Barista",
             hard_negatives: "Barista;Waiter",
             easy_negatives: "Landscaping",
+            manual_review: "Bar Manager",
             locale: "en",
             industry: "hospitality/F&B",
             confidence: "sure"
@@ -52,17 +53,25 @@ defmodule Data.SkillTaxonomy.CsvImporterTest do
       assert role["description"] == "Serves drinks"
       assert role["locale"] == "en"
       assert role["industry"] == "hospitality/F&B"
+      assert role["status"] == "differentiated"
 
       assert Enum.sort_by(role["synonyms"], & &1["term"]) == [
                %{"@type" => "Synonym", "term" => "barkeep", "locale" => "en"},
                %{"@type" => "Synonym", "term" => "barman", "locale" => "en"}
              ]
 
-      # 1 supporting + 1 sibling + 2 hard_negatives + 1 easy_negative = 5
-      assert length(result.pending_relations) == 5
+      # 1 supporting + 1 sibling + 2 hard_negatives + 1 easy_negative + 1 manual_review = 6
+      assert length(result.pending_relations) == 6
 
       assert result.pending_relations |> Enum.map(& &1.relation_type) |> Enum.sort() ==
-               ["easy_negative", "hard_negative", "hard_negative", "sibling", "supporting"]
+               [
+                 "easy_negative",
+                 "hard_negative",
+                 "hard_negative",
+                 "manual_review",
+                 "sibling",
+                 "supporting"
+               ]
 
       supporting = Enum.find(result.pending_relations, &(&1.relation_type == "supporting"))
       assert supporting.from == {:role, "Bartender", ""}

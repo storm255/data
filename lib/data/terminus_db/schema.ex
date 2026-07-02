@@ -39,6 +39,10 @@ defmodule Data.TerminusDB.Schema do
   # same `primary_name` (e.g. a fine-dining Waitstaff vs. the base role) —
   # blank ("") for the general/base row. Part of the Lexical key so a
   # variant is a distinct Role document, not an overwrite of the base one.
+  #
+  # `status` is "differentiated" (came from an actual contributor entry)
+  # or "stub" (auto-created as a relation target that doesn't have its
+  # own entry yet — see design doc §2, "Stub roles").
   defp role do
     %{
       "@type" => "Class",
@@ -49,6 +53,7 @@ defmodule Data.TerminusDB.Schema do
       "locale" => "xsd:string",
       "industry" => "xsd:string",
       "description" => %{"@type" => "Optional", "@class" => "xsd:string"},
+      "status" => "xsd:string",
       "synonyms" => %{"@type" => "Set", "@class" => "Synonym"}
     }
   end

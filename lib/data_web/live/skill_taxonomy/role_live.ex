@@ -54,6 +54,7 @@ defmodule DataWeb.SkillTaxonomy.RoleLive do
       hard_negatives: [],
       easy_negatives: [],
       exclusions: [],
+      manual_review: [],
       locale: "",
       industry: "",
       confidence: "guess"
@@ -185,6 +186,7 @@ defmodule DataWeb.SkillTaxonomy.RoleLive do
       <.list_section field={:hard_negatives} label="Hard negatives" items={@fields.hard_negatives} />
       <.list_section field={:easy_negatives} label="Easy negatives" items={@fields.easy_negatives} />
       <.list_section field={:exclusions} label="Exclusions" items={@fields.exclusions} />
+      <.list_section field={:manual_review} label="Manual review" items={@fields.manual_review} />
     </div>
     """
   end

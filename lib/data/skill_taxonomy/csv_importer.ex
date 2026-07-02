@@ -26,10 +26,10 @@ defmodule Data.SkillTaxonomy.CsvImporter do
   alias NimbleCSV.RFC4180, as: CSV
 
   @columns ~w(primary description context synonyms supporting type_of sibling
-              hard_negatives easy_negatives exclusions locale industry confidence)a
+              hard_negatives easy_negatives exclusions manual_review locale industry confidence)a
 
   @column_names Enum.map(@columns, &Atom.to_string/1)
-  @list_columns ~w(synonyms supporting type_of sibling hard_negatives easy_negatives exclusions)a
+  @list_columns ~w(synonyms supporting type_of sibling hard_negatives easy_negatives exclusions manual_review)a
 
   @type parsed :: %{
           roles: [map()],
@@ -181,18 +181,42 @@ defmodule Data.SkillTaxonomy.CsvImporter do
   using those ids. `weight` is set to `1.0` here — never contributor-set
   (see design doc §2).
 
-  Returns `{:error, reason}` on the first failed insert rather than
-  continuing with a partial import.
+  A relation naming a `Role` that's neither in this batch nor already in
+  TerminusDB gets a minimal stub created for it (`status: "stub"`, design
+  doc §2) rather than failing the import — requiring every referenced
+  role to already exist would force an import ordering contributors
+  can't realistically guarantee. The returned summary's `:stub_roles`
+  lists every `{primary_name, context}` stub-created in this run, so
+  they're visible for follow-up (differentiate it for real, or notice a
+  typo — see design doc §4). `Skill` targets never hit this path — see
+  design doc §2 on why.
+
+  Returns `{:error, reason}` on the first failed insert/query rather
+  than continuing with a partial import.
   """
-  @spec import(TerminusDB.Config.t(), parsed()) :: {:ok, map()} | {:error, term()}
+  @spec import(TerminusDB.Config.t(), parsed()) ::
+          {:ok,
+           %{
+             roles: non_neg_integer(),
+             skills: non_neg_integer(),
+             relations: non_neg_integer(),
+             stub_roles: [{String.t(), String.t()}]
+           }}
+          | {:error, term()}
   def import(%TerminusDB.Config{} = config, %{} = parsed) do
     with {:ok, role_ids} <- insert_and_index(config, parsed.roles, &role_key/1),
          {:ok, skill_ids} <- insert_and_index(config, parsed.skills, &skill_key/1),
          ids = Map.merge(role_ids, skill_ids),
-         {:ok, relation_docs} <- resolve_relations(parsed.pending_relations, ids),
+         {:ok, relation_docs, stub_roles} <-
+           resolve_relations(config, parsed.pending_relations, ids),
          {:ok, _} <- insert_all(config, relation_docs) do
       {:ok,
-       %{roles: map_size(role_ids), skills: map_size(skill_ids), relations: length(relation_docs)}}
+       %{
+         roles: map_size(role_ids),
+         skills: map_size(skill_ids),
+         relations: length(relation_docs),
+         stub_roles: stub_roles
+       }}
     end
   end
 
@@ -234,10 +258,14 @@ defmodule Data.SkillTaxonomy.CsvImporter do
   defp short_id("terminusdb:///data/" <> short), do: short
   defp short_id(other), do: other
 
-  defp resolve_relations(pending_relations, ids) do
-    Enum.reduce_while(pending_relations, {:ok, []}, fn relation, {:ok, acc} ->
-      with {:ok, from_id} <- fetch_id(ids, relation.from),
-           {:ok, to_id} <- fetch_id(ids, relation.to) do
+  defp resolve_relations(config, pending_relations, ids) do
+    init = {:ok, [], ids, []}
+
+    pending_relations
+    |> Enum.reduce_while(init, fn relation, {:ok, docs, ids, stub_roles} ->
+      with {:ok, from_id, ids, stub_roles} <-
+             fetch_or_create(config, ids, stub_roles, relation.from),
+           {:ok, to_id, ids, stub_roles} <- fetch_or_create(config, ids, stub_roles, relation.to) do
         doc = %{
           "@type" => "RoleRelation",
           "from" => from_id,
@@ -247,21 +275,86 @@ defmodule Data.SkillTaxonomy.CsvImporter do
           "weight" => 1.0
         }
 
-        {:cont, {:ok, [doc | acc]}}
+        {:cont, {:ok, [doc | docs], ids, stub_roles}}
       else
         {:error, _} = error -> {:halt, error}
       end
     end)
     |> case do
-      {:ok, docs} -> {:ok, Enum.reverse(docs)}
-      error -> error
+      {:ok, docs, _ids, stub_roles} ->
+        stub_roles =
+          stub_roles
+          |> Enum.reverse()
+          |> Enum.map(fn {:role, primary, context} -> {primary, context} end)
+
+        {:ok, Enum.reverse(docs), stub_roles}
+
+      error ->
+        error
     end
   end
 
-  defp fetch_id(ids, key) do
+  # Already resolved in this batch (or by an earlier relation in this
+  # same call) -> reuse it. Otherwise: exact-match live query, else
+  # stub-create. Only Role keys ever reach the "not in ids" branch in
+  # practice (see moduledoc), but this handles Skill keys the same way
+  # for robustness — just without adding to stub_roles, since a Skill
+  # has no "differentiated vs stub" concept to flag.
+  defp fetch_or_create(config, ids, stub_roles, key) do
     case Map.fetch(ids, key) do
-      {:ok, id} -> {:ok, id}
-      :error -> {:error, {:unresolved_reference, key}}
+      {:ok, id} ->
+        {:ok, id, ids, stub_roles}
+
+      :error ->
+        case resolve_or_stub(config, key) do
+          {:ok, id, :existing} ->
+            {:ok, id, Map.put(ids, key, id), stub_roles}
+
+          {:ok, id, :created} ->
+            stub_roles = if match?({:role, _, _}, key), do: [key | stub_roles], else: stub_roles
+            {:ok, id, Map.put(ids, key, id), stub_roles}
+
+          {:error, _} = error ->
+            error
+        end
+    end
+  end
+
+  defp resolve_or_stub(config, {:role, primary, context}) do
+    query = %{"@type" => "Role", "primary_name" => primary, "context" => context}
+
+    stub = %{
+      "@type" => "Role",
+      "primary_name" => primary,
+      "context" => context,
+      "locale" => "",
+      "industry" => "",
+      "status" => "stub",
+      "synonyms" => []
+    }
+
+    query_or_create(config, query, stub)
+  end
+
+  defp resolve_or_stub(config, {:skill, name}) do
+    query = %{"@type" => "Skill", "name" => name}
+    stub = %{"@type" => "Skill", "name" => name}
+    query_or_create(config, query, stub)
+  end
+
+  defp query_or_create(config, query, stub) do
+    case TerminusDB.Document.query(config, query) do
+      {:ok, [doc | _]} ->
+        {:ok, doc["@id"], :existing}
+
+      {:ok, []} ->
+        case insert_one(config, stub) do
+          {:ok, id} -> {:ok, id, :created}
+          {:error, _} = error -> error
+        end
+
+      {:error, _} = error ->
+        error
     end
   end
 

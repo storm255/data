@@ -15,7 +15,8 @@ defmodule Data.SkillTaxonomy.RoleLoader do
     "sibling" => :sibling,
     "hard_negative" => :hard_negatives,
     "easy_negative" => :easy_negatives,
-    "exclusion" => :exclusions
+    "exclusion" => :exclusions,
+    "manual_review" => :manual_review
   }
 
   @doc """

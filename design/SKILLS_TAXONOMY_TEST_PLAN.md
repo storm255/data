@@ -57,8 +57,8 @@ returns, then build and insert `RoleRelation` documents from those.
   skill named in two different roles' `supporting` column produces one
   `Skill` document, not two).
 - List-columns (`synonyms`, `supporting`, `type_of`, `sibling`,
-  `hard_negatives`, `easy_negatives`, `exclusions`) split on `;`,
-  trimmed, empty entries dropped.
+  `hard_negatives`, `easy_negatives`, `exclusions`, `manual_review`)
+  split on `;`, trimmed, empty entries dropped.
 - Missing `primary` column/value → import error for that row, not a
   crash of the whole file — and that row contributes no `Role`, `Skill`,
   or pending relations to the result (errors and success are exclusive
@@ -128,31 +128,51 @@ correctly threads an insert response's `@id` into the next request):
   keys giving idempotent re-import for free (Phase 1). Matches how
   `Data.TerminusDB.Setup.ensure_schema!/2` already handles this
   elsewhere in the app.
+- A `Role` document built by `RowBuilder`/passed through `import/2` as
+  one of the batch's own roles always carries `status: "differentiated"`
+  — it came from an actual contributor entry, not a placeholder.
+- A relation target (`Role` only — see design doc §2, `Skill` targets
+  never hit this) not present in the current batch, and not found via
+  an exact-match `Document.query` against TerminusDB either, gets
+  stub-created: a `Role` with just `primary_name`/`context` and
+  `status: "stub"`, inserted via `Document.replace(create: true)` same
+  as everything else, then used to resolve the relation.
+- A relation target not in the batch but found via the live
+  `Document.query` (already differentiated, or already a stub from an
+  earlier import) resolves to *that* document's id — no new document
+  created, no `Document.replace` call for it at all.
+- Two relations in the *same* batch both naming the same not-yet-seen
+  target only create **one** stub — the second reference resolves
+  against the first one's freshly-created id, not a second stub.
+- `import/2`'s return summary includes every role stub-created in that
+  run (e.g. `stub_roles: [{"Domestic Maid", ""}]`) — this is the
+  human-facing catch for both "needs differentiation" and "possible
+  typo" (design doc §4's note on why auto-creation is safe enough
+  without a fuzzy-match review step).
+- An insert failure during stub creation itself (stubbed error
+  response) surfaces as `{:error, _}` the same as any other insert
+  failure — stub creation isn't a special path that swallows errors.
 
 ### Integration check (against the real `mark-i5.mediazu.org` instance)
 
 Not a permanent automated test — a one-off `mix run` verification, same
-pattern used to validate the Phase 1 schema — running `import/2` against
-a small real CSV excerpt and confirming the resulting `RoleRelation`
-documents' `from`/`to` actually resolve to real `Role`/`Skill` documents
-when read back. **Done** — verified with a self-contained two-role
-excerpt (Bartender/Bar Back, all four symmetric-shaped relation types),
-including running `import/2` twice to confirm the second run doesn't
-duplicate relations (8 both times). All verification documents deleted
-afterward; nothing left on the live server from this phase.
+pattern used to validate the Phase 1 schema. **Done**, in two parts:
 
-**Known limitation, not yet decided:** a relation target not present in
-the *same* import batch (e.g. `Bartender`'s `sibling` column naming a
-role that isn't itself a row in this file, and wasn't imported in an
-earlier run either) fails with `{:unresolved_reference, key}` —
-`import/2` only resolves against ids from documents it just wrote in
-this call, not against anything already in TerminusDB from a prior
-import. `seed_roles.csv` doesn't hit this (every relation target in it
-is also a primary role somewhere else in the same file), but any future
-incremental/partial import could. Needs a decision before that's a real
-workflow: either look up existing documents too (a live query, not just
-this batch's insert responses), or treat cross-batch references as
-out of scope and require every file to be self-contained.
+- Base insert/resolve path — a self-contained two-role excerpt
+  (Bartender/Bar Back, all four symmetric-shaped relation types),
+  including running `import/2` twice to confirm the second run doesn't
+  duplicate relations (8 both times).
+- Stub creation — imported `Hotel Housekeeper` with `hard_negatives`
+  naming `Domestic Maid` and `manual_review` naming `Laundry Attendant`,
+  neither present anywhere yet: both landed as real `Role` documents
+  with `status: "stub"` (`Hotel Housekeeper` itself: `"differentiated"`).
+  A second, unrelated import (`Room Attendant`, also hard-negative to
+  `Domestic Maid`) resolved to the *existing* stub via the live query —
+  `stub_roles: []` on that run, and the total role count stayed at 4,
+  not 5.
+
+All verification documents deleted afterward; nothing left on the live
+server from either check.
 
 ## Phase 3 — LiveView entry form
 

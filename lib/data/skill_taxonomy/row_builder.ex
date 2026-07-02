@@ -30,7 +30,8 @@ defmodule Data.SkillTaxonomy.RowBuilder do
     sibling: "sibling",
     hard_negatives: "hard_negative",
     easy_negatives: "easy_negative",
-    exclusions: "exclusion"
+    exclusions: "exclusion",
+    manual_review: "manual_review"
   }
 
   @type fields :: %{
@@ -44,6 +45,7 @@ defmodule Data.SkillTaxonomy.RowBuilder do
           hard_negatives: [String.t()],
           easy_negatives: [String.t()],
           exclusions: [String.t()],
+          manual_review: [String.t()],
           locale: String.t(),
           industry: String.t(),
           confidence: String.t()
@@ -127,6 +129,10 @@ defmodule Data.SkillTaxonomy.RowBuilder do
     }
   end
 
+  # Always "differentiated" — a role built here came from an actual
+  # contributor entry, never a placeholder. Stub roles (status: "stub")
+  # are only ever created by Data.SkillTaxonomy.CsvImporter.import/2's
+  # relation-resolution step, not by this module.
   defp build_role_doc(fields) do
     base = %{
       "@type" => "Role",
@@ -134,6 +140,7 @@ defmodule Data.SkillTaxonomy.RowBuilder do
       "context" => fields.context,
       "locale" => fields.locale,
       "industry" => fields.industry,
+      "status" => "differentiated",
       "synonyms" => Enum.map(fields.synonyms, &synonym_doc(&1, fields.locale))
     }
 

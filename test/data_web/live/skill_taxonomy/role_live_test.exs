@@ -125,8 +125,8 @@ defmodule DataWeb.SkillTaxonomy.RoleLiveTest do
 
     # Same input, built directly through CsvImporter for comparison.
     csv = """
-    primary,description,context,synonyms,supporting,type_of,sibling,hard_negatives,easy_negatives,exclusions,locale,industry,confidence
-    Bartender,,,barkeep,cocktail prep,,,,,,en,hospitality/F&B,guess
+    primary,description,context,synonyms,supporting,type_of,sibling,hard_negatives,easy_negatives,exclusions,manual_review,locale,industry,confidence
+    Bartender,,,barkeep,cocktail prep,,,,,,,en,hospitality/F&B,guess
     """
 
     {:ok, parsed} = CsvImporter.parse(csv)

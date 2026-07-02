@@ -101,10 +101,39 @@ distinct entities. That gives two node kinds and six relation kinds:
 - **Role** — a job title. `slug`, `primary_name`, `locale` (of
   `primary_name`), `industry`, `description` (free-text semantic summary
   of the role — human documentation today, candidate embedding input for
-  the Nx layer later), `synonyms: [{term, locale}]` (an attribute list,
-  not edges).
+  the Nx layer later), `status: "differentiated" | "stub"` (see below),
+  `synonyms: [{term, locale}]` (an attribute list, not edges).
 - **Skill** — a capability, cert, or ability; not itself a job.
   `slug`, `name`.
+
+### Stub roles
+
+A relation can name a role that doesn't have its own differentiated
+entry yet (e.g. `Hotel Housekeeper`'s hard negatives include `Domestic
+Maid`, which may never get its own full sheet). Requiring the target to
+already exist would force a strict import ordering contributors can't
+realistically guarantee. Instead: `import/2` (§4) auto-creates a
+minimal placeholder `Role` (`status: "stub"`) the first time it's
+referenced and nothing else resolves it — a Lexical-keyed document with
+just `primary_name`/`context`, so later relations pointing at the same
+name resolve to the same document rather than creating duplicates.
+
+When someone eventually differentiates that role for real (a proper
+sheet/row import), the same `Document.replace(create: true)` call
+updates the existing document in place — same `@id`, so every relation
+already pointing at it stays valid — and flips `status` to
+`"differentiated"`.
+
+`status` is the durable, queryable flag for "needs follow-up" — not
+just a one-time import notification. `import/2`'s return summary also
+lists which roles got stub-created *in that run*, for immediate
+visibility, but `status: "stub"` is what makes a role find-able as
+needing attention at any later point too, e.g. from the reasoning
+catalog (§5) or a review UI (§6), not just right after an import.
+Skills don't get this treatment — `supporting` is the only relation
+type that targets a `Skill`, and its target is always part of the
+importing batch's own documents already, so there's no cross-batch
+"skill doesn't exist yet" gap the way there is for roles.
 
 ### Context-dependent variants (e.g. a 5-star-hotel Waiter vs. a diner Waiter)
 
@@ -137,6 +166,7 @@ different threshold) earns a new Role variant here.
 | `hard_negative` | Role → Role | looks similar, must not match | yes — see §5 |
 | `easy_negative` | Role → Role | obviously unrelated; low value | yes — see §5 |
 | `exclusion` | Role → Role | genuinely incompatible (compliance-style hard block) | yes — see §5 |
+| `manual_review` | Role → Role | related but risky to auto-match; flag for human judgment rather than a hard rule (from the Heeero template's row D, §4) | yes — see §5 |
 
 Every relation instance carries `confidence: :sure | :guess` plus optional
 `locale`, `industry`, and `notes`, exactly as the guide's "tag every entry"
@@ -180,6 +210,7 @@ synced via `mix terminus.setup`. Verified live against
 ```
 Role
   @id (Lexical: primary_name + context), primary_name, context, locale, industry, description
+  status          # "differentiated" | "stub" — see §2's "Stub roles"
   synonyms: {"@type" => "Set", "@class" => "Synonym"}   # embedded subdocuments: {term, locale}
 
 Skill
@@ -188,7 +219,7 @@ Skill
 RoleRelation
   from            # Role or Skill @id
   to              # Role or Skill @id
-  relation_type   # "supporting" | "type_of" | "sibling" | "hard_negative" | "easy_negative" | "exclusion"
+  relation_type   # "supporting" | "type_of" | "sibling" | "hard_negative" | "easy_negative" | "exclusion" | "manual_review"
   confidence      # "sure" | "guess"
   weight          # float, 0.0-1.0, default 1.0 — system-computed (Nx, §7), never contributor-set
   locale          # optional
@@ -218,10 +249,11 @@ cross-row checks for `CsvImporter`; live TerminusDB lookups for
 
 - **CSV/spreadsheet import** — one row per primary role (matching the
   guide's "work one primary role at a time"), columns mirroring the
-  guide's blank template plus two additions: `primary, description,
+  guide's blank template plus three additions: `primary, description,
   context, synonyms, supporting, type_of, sibling, hard_negatives,
-  easy_negatives, exclusions, locale, industry, confidence`, with
-  list-columns delimited (`;`). `Data.SkillTaxonomy.CsvImporter.parse/1`
+  easy_negatives, exclusions, manual_review, locale, industry,
+  confidence`, with list-columns delimited (`;`).
+  `Data.SkillTaxonomy.CsvImporter.parse/1`
   splits cells and handles cross-row checks (duplicate role identity,
   whether a `context` row's base role exists elsewhere in the file),
   then calls `RowBuilder.build/2` per row to get `Role`/`Skill` document
@@ -256,44 +288,41 @@ Both paths write through `TerminusDB.Document.insert`/`replace` using
 `Data.TerminusDB.config/1`, matching the pattern already established for
 this project's TerminusDB integration.
 
-### Cross-batch reference resolution + review (scoped, not built)
+### Cross-batch reference resolution: query, else stub-create
 
-`import/2` (§4/§5) currently only resolves a relation's `from`/`to`
-against documents inserted in the *same* call — a relation naming a
-role that isn't a row in the current file, and wasn't imported earlier
-either, fails outright (`{:unresolved_reference, key}`). `seed_roles.csv`
-never hits this (every relation target is also a row in the same file),
-but any future incremental import will. Two distinct risks, needing
-different handling:
+`import/2` resolves a relation's `from`/`to` in three steps, in order:
+(1) the current batch's own documents, (2) an exact-match live query
+against TerminusDB for an already-differentiated or already-stubbed
+role of that `{primary_name, context}`, (3) if neither finds it,
+auto-create a minimal `Role` stub (`status: "stub"`, §2) and use its
+freshly-assigned `@id`. Requiring a target to already exist would force
+an import ordering contributors can't realistically guarantee — a role
+might be listed as someone else's hard negative long before it gets its
+own sheet, if it ever does.
 
-- **Exact match** — safe to auto-resolve. `Role` is Lexical-keyed on
-  `{primary_name, context}`, `Skill` on `name`, so an exact lookup
-  against already-imported documents has at most one result. No
-  ambiguity possible.
-- **Near-miss** — the real danger. A typo (`"Bar-Back"` vs `"Bar
-  Back"`) won't exact-match, and auto-creating whatever doesn't resolve
-  would silently produce a near-duplicate document instead of linking
-  to the one that already exists.
+Step (2) is safe with no ambiguity: `Role` is Lexical-keyed on
+`{primary_name, context}`, so an exact lookup has at most one result.
+The risk this design deliberately accepts is a **typo** —
+`"Bar-Back"` won't exact-match `"Bar Back"`, so step (3) creates a
+distinct stub instead of linking to the real one. This is caught, not
+prevented: `import/2`'s return summary lists every role stub-created in
+that run, and reviewing that list is exactly where a typo would stand
+out ("why did this create Bar-Back *and* I already have Bar Back?").
+`status: "stub"` also makes any stub find-able at any later point too
+— from the reasoning catalog (§5) or a future review UI, not just
+right after the import that created it — so a typo missed in the
+import report isn't lost forever, just less immediately visible.
 
-Planned shape: on a failed exact match, search existing `Role`/`Skill`
-documents for near-matches (e.g. `String.jaro_distance/2` — built into
-Elixir, no new dependency) and return them as **candidates needing
-review** rather than writing anything for that relation. The rest of a
-batch that *did* resolve (exactly or via the current-batch lookup)
-still imports normally — an ambiguous reference blocks only itself, not
-the whole file.
+(A fuzzy-match "here are candidates, pick one" review step was
+considered instead of auto-creating — rejected as the default because
+it would block the rest of a healthy import on every merely-not-yet-
+differentiated reference, not just genuine typos. Worth revisiting only
+if stub-review in practice turns out not to catch typos reliably
+enough.)
 
-This is where it surfaces to a human: the LiveView CSV import flow
-(§4's LiveView form section) gets an import-review step between parse
-and commit — upload → parse → **show unresolved references with their
-candidate matches for review** → human picks the right one, creates a
-new document, or corrects the CSV → commit. `import/2`'s contract grows
-a third outcome alongside success/hard-failure to carry this: a list of
-unresolved references, each with its candidates, written nowhere yet.
-
-Not built — this section exists so the shape is agreed before the
-LiveView work (§4, Phase 3) needs it, per `SKILLS_TAXONOMY_TEST_PLAN.md`
-Phase 2's note on the same gap.
+Only `Role` targets need this — `supporting` is the only relation type
+targeting a `Skill`, and its target is always part of the importing
+batch's own documents already (§2).
 
 ---
 

@@ -16,6 +16,7 @@ defmodule Data.SkillTaxonomy.RowBuilderTest do
         hard_negatives: [],
         easy_negatives: [],
         exclusions: [],
+        manual_review: [],
         locale: "en",
         industry: "hospitality/F&B",
         confidence: "guess"
@@ -32,6 +33,7 @@ defmodule Data.SkillTaxonomy.RowBuilderTest do
         sibling: ["Barista"],
         hard_negatives: ["Barista", "Waiter"],
         easy_negatives: ["Landscaping"],
+        manual_review: ["Bar Manager"],
         confidence: "sure"
       )
 
@@ -40,16 +42,24 @@ defmodule Data.SkillTaxonomy.RowBuilderTest do
     assert result.role["@type"] == "Role"
     assert result.role["primary_name"] == "Bartender"
     assert result.role["context"] == ""
+    assert result.role["status"] == "differentiated"
 
     assert Enum.sort_by(result.role["synonyms"], & &1["term"]) == [
              %{"@type" => "Synonym", "term" => "barkeep", "locale" => "en"},
              %{"@type" => "Synonym", "term" => "barman", "locale" => "en"}
            ]
 
-    assert length(result.relations) == 5
+    assert length(result.relations) == 6
 
     assert result.relations |> Enum.map(& &1.relation_type) |> Enum.sort() ==
-             ["easy_negative", "hard_negative", "hard_negative", "sibling", "supporting"]
+             [
+               "easy_negative",
+               "hard_negative",
+               "hard_negative",
+               "manual_review",
+               "sibling",
+               "supporting"
+             ]
 
     supporting = Enum.find(result.relations, &(&1.relation_type == "supporting"))
     assert supporting.from == {:role, "Bartender", ""}

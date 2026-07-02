@@ -41,6 +41,7 @@ defmodule Data.TerminusDB.SchemaTest do
       assert role["locale"] == "xsd:string"
       assert role["industry"] == "xsd:string"
       assert role["description"] == %{"@type" => "Optional", "@class" => "xsd:string"}
+      assert role["status"] == "xsd:string"
       assert role["synonyms"] == %{"@type" => "Set", "@class" => "Synonym"}
     end
 
