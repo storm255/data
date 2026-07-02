@@ -2,7 +2,7 @@
 
 Tests to write **before** implementation for
 [`SKILLS_TAXONOMY.md`](SKILLS_TAXONOMY.md), organized by the same phased
-roadmap (§8 there). Each phase's tests should exist and fail (red) before
+roadmap (§9 there). Each phase's tests should exist and fail (red) before
 that phase's code is written, matching how `Data.Reasoning.Catalogs.Rbac`
 was validated against `test/data/reasoning/catalogs/rbac_test.exs` and
 `test/data/reasoning/store_test.exs` before it was declared done.
@@ -293,7 +293,7 @@ independent of any specific lens):
   an error.
 
 `test/data/skill_taxonomy/views/` (one file per lens actually built —
-only write these once a given lens from §7's candidate list is decided
+only write these once a given lens from §8's candidate list is decided
 worth building):
 
 - **`Confusability`**: given a graph with all six relation types, the

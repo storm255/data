@@ -85,7 +85,7 @@ approach actually performs well enough to matter — and if it is pursued,
 the expected shape is this app exposing itself as an **API service**
 `heeero_core` calls into, not a code port/merge into that codebase. Kept
 deliberately undecided until there's a performance result to decide from
-(see §9, and the `candidate/2` note in §5).
+(see §10, and the `candidate/2` note in §5).
 
 ---
 
@@ -149,7 +149,7 @@ Every relation also carries `weight: float (0.0–1.0), default 1.0`. This is
 contributors shouldn't grade relationships ("don't worry about
 numbers/scores — just the words and the relationships"), and humans are
 unreliable at hand-picking a meaningful decimal anyway. It exists as a
-placeholder the Nx layer (§6) fills in later with real similarity/distance
+placeholder the Nx layer (§7) fills in later with real similarity/distance
 values, once it exists; until then every relationship defaults to `1.0` —
 full, undifferentiated weight — which is exactly the current unweighted
 boolean behavior, so adding the field changes nothing until something
@@ -190,7 +190,7 @@ RoleRelation
   to              # Role or Skill @id
   relation_type   # "supporting" | "type_of" | "sibling" | "hard_negative" | "easy_negative" | "exclusion"
   confidence      # "sure" | "guess"
-  weight          # float, 0.0-1.0, default 1.0 — system-computed (Nx, §6), never contributor-set
+  weight          # float, 0.0-1.0, default 1.0 — system-computed (Nx, §7), never contributor-set
   locale          # optional
   industry        # optional
   notes           # optional
@@ -337,13 +337,13 @@ stay directional (no closure rule).
   (structurally identical to the `ancestor`/`reachable` pattern already
   proven with RBAC). `related/2` stays arity 2 for now — combining
   per-hop weights into a path weight (e.g. via `{:mul, ...}` constraints
-  chained across recursive steps) is deferred to whenever §6 actually
+  chained across recursive steps) is deferred to whenever §7 actually
   produces non-1.0 weights to combine; no point designing that
   aggregation before there's real data to shape it against.
 - Derived, negated: `excluded/2` — true if a candidate pair is caught by
   `hard_negative_sym`, `easy_negative_sym`, or `exclusion_sym`, regardless
   of weight (while every weight defaults to `1.0`, this is equivalent to
-  today's boolean gate; once §6 produces real weights, this is the place
+  today's boolean gate; once §7 produces real weights, this is the place
   a `{:gte, :W, threshold}` constraint would go — deferred, not designed
   yet). `exclusion_sym` gates `excluded` unconditionally, ignoring
   whatever weight is stored, per §2. `eligible/2` — `candidate/2` (an
@@ -364,7 +364,7 @@ auditable.
 externally. Two different shapes this could take, not yet decided
 between:
 
-- **Batch/materialized** — something (this project's Nx layer, §6, if
+- **Batch/materialized** — something (this project's Nx layer, §7, if
   built) produces a `candidate/2` fact set up front, and `eligible/2` is
   materialized over the whole set at once. This is what's stubbed for
   Phase 4 testing today.
@@ -379,7 +379,7 @@ between:
   checking.
 
 Which shape is right depends on whether `heeero_core` integration (§1)
-and/or the Nx layer (§6) actually happen — left open until one of those
+and/or the Nx layer (§7) actually happen — left open until one of those
 is decided. This catalog's job, either way, is the gate, not candidate
 generation.
 
@@ -400,7 +400,109 @@ hospitality scale, is "completely appropriate" in plain memory).
 
 ---
 
-## 6. Semantic layer (Nx) — deferred, staged
+## 6. Contributor guidance prose: capture, interpretation, and review
+
+Contributors write two kinds of prose per category per role — "Expanded
+Detail" and "Heeero matching logic" (per the Heeero Role Differentiation
+Template, §4) — that aren't structured relationship data, but *are*
+valuable: they're a domain expert explaining, in plain language, how a
+category should actually govern matching for this role (e.g. *"Match
+only when guest-room cleaning and hotel room turnover are present"*).
+This section covers how that prose is captured, how an LLM's attempt to
+structure it is stored alongside the original without replacing it, and
+how the result gets surfaced for review before it's trusted.
+
+### Storage: original and interpreted, always both, never merged
+
+A new document class, one per `(role, category)` pair — not folded into
+`Role` itself, since it needs its own review lifecycle and audit trail
+independent of the role's core data:
+
+```
+RoleGuidance
+  role                 # Role @id this belongs to
+  category             # one of the 8 categories (primary_role, synonyms,
+                        # supporting, type_of_sibling, hard_negative,
+                        # easy_negative, exclusion, manual_review)
+  source_text          # verbatim contributor prose - immutable once written
+  interpretation        # optional - the LLM's structured proposal (string; see below)
+  interpreted_at         # optional
+  interpreter_version     # optional - which prompt/model produced it
+  review_status          # "not_interpreted" | "pending_review" | "approved" | "rejected" | "edited"
+  reviewed_by / reviewed_at   # optional
+```
+
+`source_text` and `interpretation` are separate fields that both
+persist — `source_text` is never overwritten by the interpretation
+step. Editing `source_text` later resets `review_status` to
+`pending_review` and should trigger re-interpretation; an approval is
+only valid for the exact text it was approved against.
+
+### What shape the interpretation itself should take
+
+Not free natural-language restatement (safe but doesn't help build
+anything), and not a fully-formed `ExDatalog` rule struct directly (a
+malformed struct is a worse failure mode than a malformed string).
+Middle ground: the LLM produces something close to
+`ExDatalog.Program.add_rule/3`'s shorthand notation, as a **string**,
+which is then run through `ExDatalog.validate/1` before it's ever shown
+to a reviewer — reusing the stratification/safety-checking machinery
+already proven with the RBAC catalog (§5) as a first-pass filter, so a
+structurally invalid interpretation never reaches the review queue at
+all. The prompt itself should constrain the interpretation to only
+reference terms already present in that role's own term-level data
+(its actual supporting skills, hard negatives, etc.) — bounds
+hallucination risk, and keeps the LLM's job "structure what's already
+been said" rather than "invent new claims."
+
+### Two different LLM roles — kept conceptually separate
+
+This is the **authoring-time** counterpart to the query-time idea in
+§11: authoring-time interpretation happens once per `(role, category)`,
+gets human-reviewed, and the result becomes part of the trusted,
+deterministic rule base. Query-time translation (a live natural-language
+question → a Datalog goal → an answer) happens per-query with no
+per-query review — that's only safe *because* it's just
+selecting/parameterizing against a rule base that authoring-time review
+already vetted, not inventing new reasoning logic live. Skipping
+authoring-time review would mean trusting the LLM's reasoning on every
+query instead of once, up front.
+
+### Review surface: same shape as two other things already in this doc
+
+Three things already in this design turn out to be the same underlying
+pattern — "something produced a candidate; nothing acts on it until a
+human confirms, edits, or rejects it":
+
+1. Cross-batch CSV reference resolution (§4) — an item + fuzzy candidate
+   matches, needing confirmation.
+2. This section — an item + one structured interpretation, needing
+   confirmation.
+3. The Heeero template's own "Manual Review / Low-Confidence Matches"
+   category (row D, §4) — an item a contributor explicitly flagged as
+   needing human judgment before it's trusted.
+
+Worth building as one shared reviewable-item concept (`kind`, `subject`,
+`proposal`, `status`) feeding one review surface, rather than three
+bespoke UIs — flagged here as a real generalization opportunity now that
+there are three independent motivating cases, not decided or scheduled.
+
+**Highlighting, concretely:** `source_text` always renders as plain,
+trusted prose. `interpretation` renders visually distinct — bordered or
+tinted, explicitly labeled ("AI-suggested — not yet confirmed"), never
+styled to look like confirmed data, with approve/edit/reject actions
+attached. Even after approval, a permanent marker that a rule
+originated from an LLM interpretation should stay visible — this
+project's whole approach to TerminusDB is traceable provenance (commit
+history, `explain: true`), and silently laundering an AI suggestion
+into indistinguishable "real" data would work against that.
+
+Not built — this section exists to agree the shape before any of it is
+implemented.
+
+---
+
+## 7. Semantic layer (Nx) — deferred, staged
 
 Not built until §4–5 exist and produce real data to evaluate against.
 
@@ -421,7 +523,7 @@ Not built until §4–5 exist and produce real data to evaluate against.
 
 ---
 
-## 7. Visualization — Choreo
+## 8. Visualization — Choreo
 
 Sequenced last, once real data and reasoning output exist to visualize.
 The goal isn't one fixed diagram — it's being able to look at the same
@@ -498,7 +600,7 @@ lens doesn't have to be refactored to make room for the second.
 
 ---
 
-## 8. Phased roadmap
+## 9. Phased roadmap
 
 1. **Done.** TerminusDB schema (`Role`, `Skill`, `RoleRelation`, plus the
    `Synonym` subdocument) in `Data.TerminusDB.Schema.classes/0`; synced
@@ -510,25 +612,25 @@ lens doesn't have to be refactored to make room for the second.
 4. `Data.Reasoning.Catalogs.SkillTaxonomy` + `Loaders.SkillTaxonomy`,
    validated against a small real dataset (5–10 hand-entered roles).
 5. Measure symbolic-only match quality against real data; decide whether
-   §6 Phase C is warranted.
+   §7 Phase C is warranted.
 6. (Conditional) Nx contrastive projection.
 7. Choreo visualization.
 
 ---
 
-## 9. Open decisions
+## 10. Open decisions
 
 - **`Yog` standalone usability** — resolved: `yog` is an independent hex
   package, but it's a **Gleam** library, not Elixir. Callable from
   Elixir (Gleam compiles to BEAM bytecode; `Result`/custom types are
   usable Erlang terms), but not idiomatic-Elixir-smooth — lowercase
   module access, Gleam-shaped records, no `@doc`/`@spec`. Default to
-  Choreo's Elixir-native vocabulary wrappers (§7); reach for `Yog`
+  Choreo's Elixir-native vocabulary wrappers (§8); reach for `Yog`
   directly only if a needed capability isn't exposed by any of them.
-- **Which visualization lenses are actually worth building** — §7 names
+- **Which visualization lenses are actually worth building** — §8 names
   candidates (`Confusability`, `MindMap`, `Dependency`, `Full`) but only
   commits to the seam (canonical graph → pluggable transforms), not to
-  building all of them. Decide per-lens when §7 starts, based on what's
+  building all of them. Decide per-lens when §8 starts, based on what's
   actually useful once real data exists.
 - **`candidate/2` source and shape** — stubbed through §5; batch
   (Nx-produced) vs. point-query (served to `heeero_core` over an API)
@@ -539,10 +641,10 @@ lens doesn't have to be refactored to make room for the second.
 
 ---
 
-## 10. Future exploration (not scheduled)
+## 11. Future exploration (not scheduled)
 
 Ideas surfaced during design discussion, deliberately kept separate from
-the committed roadmap (§8) — captured so they aren't lost, not because
+the committed roadmap (§9) — captured so they aren't lost, not because
 any of this is decided or scheduled.
 
 ### LLM-assisted candidate generation + mobile swipe triage
@@ -555,7 +657,7 @@ UI rather than a form: swipe to keep/discard (building `synonym`/
 `supporting`/`hard_negative` sets as inclusions vs. exclusions),
 ordering by importance, possibly left/right mapped to positive/negative.
 
-- Distinct from the Nx layer (§6): an LLM generates plausible
+- Distinct from the Nx layer (§7): an LLM generates plausible
   *candidate terms* in natural language for a human to judge; Nx
   measures *numeric similarity* between terms already in the taxonomy.
   Different tools, different jobs — worth keeping conceptually separate
@@ -583,7 +685,7 @@ strength, set by a physical drag gesture rather than typing a number.
   estimate — so this may be the one interface where a human-set weight
   is actually trustworthy. Worth revisiting the Nx-only-writes-weight
   decision if this gets built.
-- Also a plausible *training signal* for the Nx projection (§6): rather
+- Also a plausible *training signal* for the Nx projection (§7): rather
   than Nx supplying weight unilaterally, human-placed positions could
   serve as additional labeled input — alongside `synonym`/
   `hard_negative` pairs — for the contrastive loss to learn to
@@ -598,7 +700,7 @@ Rust/Polars-backed) and Parquet as a columnar storage/interchange format,
 as an alternative to hand-rolled CSV parsing and row-by-row `Enum`/`Map`
 logic once the dataset outgrows what that comfortably handles.
 
-- Most relevant to the Nx layer (§6): Explorer and Nx are designed to
+- Most relevant to the Nx layer (§7): Explorer and Nx are designed to
   interoperate (dataframe ↔ tensor conversion), so a training pipeline
   loading/preprocessing embedding vectors or curated pairs at scale
   would likely want Explorer in front of Nx rather than plain Elixir
@@ -634,7 +736,7 @@ language** for the person asking.
   Repeatability is the entire premise of the RBAC/SkillTaxonomy scaffold
   already built (§5); this idea preserves that instead of trading it
   away for conversational convenience.
-- `req_llm` (added to `mix.exs` for the §10 word-cloud idea above)
+- `req_llm` (added to `mix.exs` for the §11 word-cloud idea above)
   is the natural fit for both translation calls.
 - Failure mode to design for, not yet decided: what happens when the
   LLM produces a malformed or nonsensical Datalog goal from an ambiguous
