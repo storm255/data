@@ -46,6 +46,8 @@ defmodule Data.MixProject do
       {:req_llm, "~> 1.17"},
       {:decimal, "~> 3.1"},
       {:nimble_csv, "~> 1.3"},
+      {:spreadsheet, "~> 0.6"},
+      {:xlsx_writer, "~> 0.10"},
       {:ex_doc, "~> 0.40", only: :dev, runtime: false},
       {:igniter, "~> 0.6", only: [:dev, :test]},
       {:phoenix, "~> 1.8.8"},
