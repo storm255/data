@@ -823,7 +823,7 @@ lens doesn't have to be refactored to make room for the second.
    genuine `RowBuilder` gap along the way (two synonyms resolving to the
    same `(term, locale)` produced a duplicate-subdocument-id error —
    now deduped).
-8. **Phase 1 done** (promoted ahead of #9) — the stub/near-duplicate
+8. **Done** (promoted ahead of #9) — the stub/near-duplicate
    reconciliation LiveView (§11): a meaningful fraction of the 114
    stubs from #7 are the same real-world role spelled multiple ways
    (e.g. `Laundry Attendant` / `Laundry Attendant / Linen Attendant`).
@@ -838,17 +838,17 @@ lens doesn't have to be refactored to make room for the second.
    repoints their relations, with self-loop and collision handling;
    `keep_separate/4`/`mark_unrelated/3` for the other two outcomes),
    and `DataWeb.SkillTaxonomy.ReconciliationLive`
-   (`/skill_taxonomy/reconciliation`). Verified live against a real
-   duplicate cluster on `mark-i5.mediazu.org`. **Phase 2 (the
-   drag-and-drop weight widget for "keep separate but related") is not
-   built** — the LiveView only offers merge, pick-canonical-then-merge,
-   and mark-unrelated actions; a human who decides a cluster's members
-   are related-but-genuinely-distinct (rather than duplicates or
-   unrelated) has no action to take on that decision yet. `"needs
-   manual review"` is a separate, narrower case (2+ *differentiated*
-   roles in one cluster — merging those needs their descriptions/
-   relations/guidance reconciled too, out of scope for automated
-   action either phase). See §11 for the full Phase 2 design.
+   (`/skill_taxonomy/reconciliation`), including the drag-and-drop
+   weight widget (an SVG `Phoenix.LiveView.ColocatedHook`, this app's
+   first) for the "keep separate but related" decision. Verified live
+   against a real duplicate cluster on `mark-i5.mediazu.org` — the
+   server-side write paths, not the browser drag interaction itself,
+   which has no test infrastructure to exercise (§11 notes this
+   explicitly). Scoped to two-member clusters only for now; `"needs
+   manual review"` (2+ *differentiated* roles in one cluster) stays a
+   separate, out-of-scope-for-automation case. See §11 for what's
+   still open (larger clusters, Nx-embedding-based clustering, a
+   Choreo lens view of all open clusters at once).
 9. Measure symbolic-only match quality against real (reconciled) data;
    decide whether §7 Phase C is warranted.
 10. (Conditional) Nx contrastive projection.
@@ -971,25 +971,64 @@ known tradeoff — "caught, not prevented" via the import summary's
 `stub_roles` list (§4) — but a flat text list stops being a usable
 reconciliation tool once the count is in the hundreds.
 
-Proposed shape (not built):
+**Done** (§9 roadmap item 8): `DataWeb.SkillTaxonomy.ReconciliationLive`
+(`/skill_taxonomy/reconciliation`), `Data.SkillTaxonomy.Reconciliation`
+(pure clustering — word-normalized Jaro distance, `already_related`
+exclusion), and `Data.SkillTaxonomy.ClusterResolver` (`merge/3`,
+`keep_separate/4`, `mark_unrelated/3`). Includes the drag-and-drop
+weight widget: an SVG canvas with a fixed reference role at the
+center and one draggable candidate node, drop distance converted to
+weight via `Reconciliation.distance_to_weight/1`, dragging past the
+outer ring recording `easy_negative` instead — implemented as a
+`Phoenix.LiveView.ColocatedHook` (plain SVG + Pointer Events, no new
+JS dependency; a data-bound library like D3 would be unjustified for
+a handful of fixed nodes around one center).
 
-- A LiveView facet, alongside the existing single-role edit form (§4),
-  that clusters `status: "stub"` roles by name closeness — starting
-  with simple string distance (e.g. Jaro-Winkler/edit distance) as a
-  first pass, potentially upgraded to Nx-embedding closeness once §7
-  exists — and lets a human decide, per cluster: which is canonical;
-  which are true synonyms of it (folded into the canonical role's
-  `Synonym` subdocuments, same mechanism as any other synonym); and
-  which are merely *related* rather than identical (kept as separate
-  roles, linked via `sibling`/`type_of` with the usual
-  `weight`/`relationship_detail`, not merged away).
-- Visualized via a new Choreo lens (§8) rendering these clusters as a
-  graph/cloud rather than a flat list — close nodes drawn visually
-  close together — so the reconciliation decision is made by looking
-  at a picture, not scanning a table. Same "distance expresses
-  closeness" idea as the Concentric-circle drag UI above; could
-  plausibly reuse that interaction pattern (drag to merge/separate)
-  rather than inventing a new one.
+**Real-usage fixes, found by actually looking at the live page (via a
+Browserless screenshot, not just inspecting rendered HTML)**: role
+names as `<text>` labels *inside* the SVG collided with each other —
+real names are long enough (e.g. "Banquet / Event F&B Supervisor")
+that no in-widget label position reliably avoids overlap. Fixed by
+making the SVG nodes small unlabeled drag handles and moving every
+name into normal HTML text outside the SVG, where arbitrary length
+just wraps instead of colliding. The concentric guide rings also
+needed an explicit legend (what does dragging across each ring
+threshold actually mean?) — added as plain HTML text alongside the
+widget, not more SVG `<text>`, for the same reason.
+
+Scoped narrower than originally sketched, on purpose: merge,
+mark-unrelated, and the drag widget all only handle **two-member**
+clusters for now — mixing "merge some members, weight the rest" in one
+larger cluster is a reasonable future enhancement, not built. Clusters
+with 2+ *differentiated* members still render as needing manual review
+with no automated action (merging differentiated-into-differentiated
+needs descriptions/relations/guidance reconciled too). Clustering is
+plain word-normalized Jaro distance today, not yet upgraded to
+Nx-embedding closeness (§7, once it exists). Not visualized via a
+Choreo lens (§8) — the SVG widget *is* the visualization for now; a
+dedicated "synonym/stub cloud" lens showing every open cluster at once
+(rather than one at a time, in-page) remains a distinct, unbuilt idea.
+
+**Known clustering limitation, deliberately not chased with more string
+heuristics**: generic role-suffix words (`Attendant`, `Supervisor`,
+`Manager`, `Server`, `Staff`...) are extremely common across genuinely
+different hospitality roles, and single-linkage connected-components
+clustering will chain through them — a real cluster from the Bangkok
+stub list bridged `Bar Manager` all the way to `Waitstaff` and `Café
+Supervisor` through a sequence of shared-suffix intermediate names.
+Tuning this further with stop-word lists or a Jaccard/word-overlap
+blend was considered and set aside: this is exactly the kind of
+semantic-vs-generic-term distinction that plain string similarity
+structurally can't make ("Attendant" carries no meaning on its own; the
+model has no way to know that without understanding the domain) — the
+durable fix is §7's Nx/embedding layer once real data exists to train
+against, not further hand-tuned heuristics here. Until then, clustering
+stays a deliberately rough first-pass filter — every cluster still
+requires a human decision regardless of how it got grouped, so a
+too-permissive chain costs extra "not related" clicks, not bad data.
+The reviewer UI (nested anchor/candidate navigation, below) is what
+actually absorbs this imprecision, not the clustering algorithm.
+
 - **Resolved**: these are two different decisions, not one number.
   Alternative spellings of the *same* role (`Laundry Attendant` /
   `Laundry Attendant / Linen Attendant`) are a **direct synonym

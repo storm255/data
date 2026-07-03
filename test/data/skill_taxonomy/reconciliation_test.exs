@@ -50,6 +50,18 @@ defmodule Data.SkillTaxonomy.ReconciliationTest do
       assert Reconciliation.cluster(roles) == []
     end
 
+    test "'&' inside a word (e.g. F&B) doesn't split into meaningless single-letter tokens" do
+      # Splitting "F&B" into the words "f" and "b" pollutes the word set
+      # with generic single-character tokens that every other F&B-titled
+      # role also picks up — inflating similarity between roles that
+      # only share the abbreviation, not any real meaning. Verified this
+      # exact pair crosses the default threshold with the bug present
+      # (0.856) and correctly falls below it once "F&B" normalizes to
+      # one token ("fb") instead of two spurious single letters (0.656).
+      roles = [role("a", "F&B Cashier"), role("b", "Bell Cashier")]
+      assert Reconciliation.cluster(roles, 0.75) == []
+    end
+
     test "singletons (no close match) are excluded entirely" do
       roles = [role("a", "Bartender"), role("b", "Zzzz Nonexistent Role")]
       assert Reconciliation.cluster(roles) == []
@@ -111,36 +123,32 @@ defmodule Data.SkillTaxonomy.ReconciliationTest do
   end
 
   describe "classify/1" do
-    test "a cluster with exactly one differentiated role is auto_mergeable, differentiated as canonical" do
+    # Deliberately just a filter now, not a pre-decided action shape — a
+    # cluster surfaced by clustering can turn out to be a long chain of
+    # loosely-related names (real example: a Bangkok stub cluster with
+    # ~16 members bridged by generic words like "Manager"/"Supervisor"),
+    # where the right move is to merge some sub-pairs and leave others
+    # for a later pass, not to force one canonical for the whole cluster.
+    # The reviewer works through it pairwise instead (anchor_and_candidates/1
+    # below, surfaced one candidate at a time in the LiveView); this only
+    # decides whether a cluster needs looking at *at all*.
+    test "a cluster with at least one stub member is actionable" do
       cluster = [
         role("a", "Laundry Attendant", "differentiated"),
         role("b", "Laundry Attendant / Linen Attendant", "stub"),
         role("c", "Laundry/Linen Attendant", "stub")
       ]
 
-      assert {:auto_mergeable, canonical, duplicates} = Reconciliation.classify(cluster)
-      assert canonical["@id"] == "a"
-      assert Enum.map(duplicates, & &1["@id"]) |> Enum.sort() == ["b", "c"]
+      assert {:actionable, ^cluster} = Reconciliation.classify(cluster)
     end
 
-    test "a cluster of all stubs needs a canonical picked by a human" do
+    test "a cluster of all stubs is actionable" do
       cluster = [
         role("a", "Kitchen Steward", "stub"),
         role("b", "Steward / Kitchen Steward", "stub")
       ]
 
-      assert {:pick_canonical, candidates} = Reconciliation.classify(cluster)
-      assert Enum.map(candidates, & &1["@id"]) |> Enum.sort() == ["a", "b"]
-    end
-
-    test "a cluster with two or more differentiated roles needs manual review, not automated merge" do
-      cluster = [
-        role("a", "Baker", "differentiated"),
-        role("b", "Baker / Bakery Chef", "differentiated"),
-        role("c", "Baker Assistant", "stub")
-      ]
-
-      assert {:needs_manual_review, ^cluster} = Reconciliation.classify(cluster)
+      assert {:actionable, ^cluster} = Reconciliation.classify(cluster)
     end
 
     test "a cluster with no stub members needs no action" do
@@ -150,6 +158,43 @@ defmodule Data.SkillTaxonomy.ReconciliationTest do
       ]
 
       assert Reconciliation.classify(cluster) == :no_action_needed
+    end
+  end
+
+  describe "anchor_and_candidates/1" do
+    test "the differentiated member is the anchor when exactly one exists" do
+      cluster = [
+        role("a", "Laundry Attendant / Linen Attendant", "stub"),
+        role("b", "Laundry Attendant", "differentiated"),
+        role("c", "Laundry/Linen Attendant", "stub")
+      ]
+
+      assert {anchor, candidates} = Reconciliation.anchor_and_candidates(cluster)
+      assert anchor["@id"] == "b"
+      assert Enum.map(candidates, & &1["@id"]) |> Enum.sort() == ["a", "c"]
+    end
+
+    test "the alphabetically-first name is the anchor when every member is a stub" do
+      cluster = [
+        role("a", "Steward / Kitchen Steward", "stub"),
+        role("b", "Kitchen Steward", "stub")
+      ]
+
+      assert {anchor, candidates} = Reconciliation.anchor_and_candidates(cluster)
+      assert anchor["@id"] == "b"
+      assert Enum.map(candidates, & &1["@id"]) == ["a"]
+    end
+
+    test "with two or more differentiated members, the alphabetically-first differentiated one is the anchor" do
+      cluster = [
+        role("a", "Baker / Bakery Chef", "differentiated"),
+        role("b", "Baker", "differentiated"),
+        role("c", "Baker Assistant", "stub")
+      ]
+
+      assert {anchor, candidates} = Reconciliation.anchor_and_candidates(cluster)
+      assert anchor["@id"] == "b"
+      assert Enum.map(candidates, & &1["@id"]) |> Enum.sort() == ["a", "c"]
     end
   end
 

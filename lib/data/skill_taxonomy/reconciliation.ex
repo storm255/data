@@ -15,11 +15,7 @@ defmodule Data.SkillTaxonomy.Reconciliation do
 
   @type role :: %{required(String.t()) => term()}
 
-  @type classification ::
-          {:auto_mergeable, canonical :: role(), duplicates :: [role()]}
-          | {:pick_canonical, candidates :: [role()]}
-          | {:needs_manual_review, cluster :: [role()]}
-          | :no_action_needed
+  @type classification :: {:actionable, cluster :: [role()]} | :no_action_needed
 
   @default_threshold 0.75
 
@@ -55,32 +51,52 @@ defmodule Data.SkillTaxonomy.Reconciliation do
   end
 
   @doc """
-  Decides what kind of review action a cluster needs, based on how
-  many members are already `status: "differentiated"` vs `"stub"`:
+  Whether a cluster needs a human decision at all — `:no_action_needed`
+  if it has no `status: "stub"` members (either a deliberate naming
+  decision already made, or out of this tool's scope either way),
+  `{:actionable, cluster}` otherwise.
 
-  - No stub members at all -> `:no_action_needed` (either a deliberate
-    naming decision already made, or out of this tool's scope either
-    way).
-  - Exactly one differentiated member -> `{:auto_mergeable, canonical,
-    duplicates}` — the differentiated role is unambiguously canonical.
-  - Zero differentiated members (all stubs) -> `{:pick_canonical,
-    candidates}` — a human has to choose.
-  - Two or more differentiated members -> `{:needs_manual_review,
-    cluster}` — merging differentiated-into-differentiated needs its
-    own reconciliation of descriptions/relations/guidance, not just an
-    empty stub disappearing; explicitly out of scope here (design doc
-    §11).
+  Deliberately **not** a pre-decided action shape (no more
+  auto-mergeable/pick-canonical/needs-manual-review split) — a cluster
+  can turn out to be a long chain of only loosely-related names (a real
+  Bangkok import cluster had ~16 members bridged by generic words like
+  "Manager"/"Supervisor", mixing genuinely-duplicate pairs with
+  genuinely-different roles). The right move there is picking which
+  *subset* is actually the same role and leaving the rest for a later
+  pass, not forcing one canonical choice over the whole cluster — that
+  happens pairwise in the LiveView (`anchor_and_candidates/1`), not here.
   """
   @spec classify([role()]) :: classification()
   def classify(cluster) do
-    {differentiated, stubs} = Enum.split_with(cluster, &(&1["status"] != "stub"))
-
-    case {differentiated, stubs} do
-      {_, []} -> :no_action_needed
-      {[], _stubs} -> {:pick_canonical, stubs}
-      {[canonical], _stubs} -> {:auto_mergeable, canonical, stubs}
-      {_multiple, _stubs} -> {:needs_manual_review, cluster}
+    if Enum.any?(cluster, &(&1["status"] == "stub")) do
+      {:actionable, cluster}
+    else
+      :no_action_needed
     end
+  end
+
+  @doc """
+  Splits an actionable cluster into `{anchor, candidates}` for pairwise
+  review — "a human only deals with pairs at any time" (design doc §11):
+  the LiveView shows one `{anchor, candidate}` comparison at a time
+  instead of asking a reviewer to make sense of an N-way list.
+
+  The anchor is the alphabetically-first `status: "differentiated"`
+  member if any exist (an already-differentiated role is always a safer
+  default anchor than a placeholder stub), else the alphabetically-first
+  member overall. Every other member becomes a `candidates` entry, each
+  reviewed independently against the anchor — merging a candidate that's
+  *itself* differentiated stays a LiveView-level restriction (design doc
+  §11: differentiated-into-differentiated needs its own reconciliation,
+  out of scope here), not something this function decides.
+  """
+  @spec anchor_and_candidates([role()]) :: {role(), [role()]}
+  def anchor_and_candidates(cluster) do
+    differentiated = Enum.filter(cluster, &(&1["status"] != "stub"))
+    pool = if differentiated == [], do: cluster, else: differentiated
+
+    anchor = Enum.min_by(pool, & &1["primary_name"])
+    {anchor, cluster -- [anchor]}
   end
 
   @doc """
@@ -146,9 +162,16 @@ defmodule Data.SkillTaxonomy.Reconciliation do
   # shape, not single-character typos, so word-set normalization
   # before Jaro distance catches the actual cases that matter (see
   # cluster/2's test suite for the real numbers this was tuned against).
+  #
+  # "&" is dropped (not treated as a separator like other punctuation)
+  # before splitting, so "F&B" — extremely common across otherwise
+  # unrelated hospitality titles — normalizes to the single token "fb"
+  # instead of splitting into the meaningless single-letter words "f"
+  # and "b", which every other F&B-titled role would then also share.
   defp normalize(name) do
     name
     |> String.downcase()
+    |> String.replace("&", "")
     |> String.replace(~r/[^a-z0-9]+/, " ")
     |> String.split()
     |> Enum.uniq()
